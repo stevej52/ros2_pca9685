@@ -1,14 +1,6 @@
 # ros2_pca9685
 ROS2 Package to convert /cmd-vel to PWM signals using a PCA9685
 
-cd dev_ws
-
-colcon build --packages-select ros2_pca9685
-
-source ./install/setup.bash
-
-ros2 run ros2_pca9685 listener
-
 
 -----Changes needed to subscriber_member_function.py------------------
 
@@ -41,5 +33,17 @@ bs1=180-thrinit # reverse the steering number for 4-Wheel steering
 kit.servo[2].angle = bs1 #this is the back servo for 4-Wheel Steering Servo- Runs reverse direction - number will need to be set
 
 
-also change servo numbers in move_robot() function
+Also change servo numbers in move_robot() function
+
+Build after all changes made:
+
+
+cd dev_ws
+
+colcon build --packages-select ros2_pca9685
+
+source ./install/setup.bash
+
+ros2 run ros2_pca9685 listener
+
 
