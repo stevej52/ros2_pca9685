@@ -15,19 +15,26 @@ ros2 run ros2_pca9685 listener
 pca.frequency = 100 # I keep reading that 50Hz is good for servos but after lots of testing, im using 100Hz
 
 maxr=135 # Max Right servo travel
+
 minl=30 # Max Left servo travel
+
 maxthr=125 # Max Throttle PWM
-minthr= 65 # Min Throttle PWm
+
+minthr= 65 # Min Throttle PWM
+
 thrinit = 90 # Throttle Zero
+
 strinit = 85 # Steering Zero
+
 print("Initializing Propulsion System") #
 kit.servo[0].angle = thrinit # this Throttle Servo number will need to be set
-time.sleep(1) #
+
+time.sleep(1) # wait 1 second for the ESC to initialize zero
  
 print("Initializing Steering System")
 kit.servo[1].angle = strinit #this Steering Servo number will need to be set
 
-bs1=180-thrinit
+bs1=180-thrinit # reverse the steering number for 4-Wheel steering
 kit.servo[2].angle = bs1 #this is the back servo for 4-Wheel Steering Servo- Runs reverse direction - number will need to be set
 
 
