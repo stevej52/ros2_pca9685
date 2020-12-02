@@ -31,5 +31,6 @@ kit.servo[1].angle = strinit #this Steering Servo number will need to be set
 bs1=180-thrinit
 kit.servo[2].angle = bs1 #this is the back servo for 4-Wheel Steering Servo- Runs reverse direction - number will need to be set
 
+
 also change servo numbers in move_robot() function
 
