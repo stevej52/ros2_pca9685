@@ -1,6 +1,13 @@
 # ros2_pca9685
 ROS2 Package to convert /cmd-vel to PWM signals using a PCA9685
 
+All code was adapted from these two tutorials.
+
+https://index.ros.org/doc/ros2/Tutorials/Creating-Your-First-ROS2-Package/
+
+https://index.ros.org/doc/ros2/Tutorials/Writing-A-Simple-Py-Publisher-And-Subscriber/
+
+
 
 -----Changes needed to subscriber_member_function.py------------------
 
