@@ -1,6 +1,10 @@
 # ros2_pca9685
 ROS2 Package to convert /cmd_vel topic to PWM signals using a PCA9685
 
+With only this package and the ROS2 teleop_twist_joy package you can control ESC's and servos with a joystick or gamepad usong ROS2.
+
+Nav2 movement is also controlled through /cmd_vel so Nav2 works as well.
+
 Tested on ROS2 Dashing and ROS2 Foxy
 
 All code was adapted from these two tutorials.
