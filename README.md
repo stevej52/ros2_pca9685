@@ -1,6 +1,8 @@
 # ros2_pca9685
 ROS2 Package to convert /cmd_vel topic to PWM signals using a PCA9685
 
+Tested on ROS2 Dashing and ROS2 Foxy
+
 All code was adapted from these two tutorials.
 
 https://index.ros.org/doc/ros2/Tutorials/Creating-Your-First-ROS2-Package/
