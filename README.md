@@ -7,6 +7,10 @@ https://index.ros.org/doc/ros2/Tutorials/Creating-Your-First-ROS2-Package/
 
 https://index.ros.org/doc/ros2/Tutorials/Writing-A-Simple-Py-Publisher-And-Subscriber/
 
+Need to install adafruit_pca9685 and adafruit_servokit libraries.
+
+sudo pip3 install adafruit-pca9685
+sudo pip3 install adafruit-circuitpython-servokit
 
 
 -----Changes needed to subscriber_member_function.py------------------
