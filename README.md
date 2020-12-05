@@ -22,7 +22,7 @@ sudo pip3 install adafruit-circuitpython-servokit
 
 -----Changes needed to subscriber_member_function.py------------------
 
-pca.frequency = 100 # I keep reading that 50Hz is good for servos even thought I thought it was 75Hz, but after lots of testing I'm using 100Hz mainly for proper ESC zero
+pca.frequency = 100 # I keep reading that 50Hz is good for servos even though I thought it was 75Hz, but after lots of testing I'm using 100Hz mainly for proper ESC zero
 
 maxr=135 # Max Right servo travel
 
