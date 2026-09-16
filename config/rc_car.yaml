@@ -1,0 +1,47 @@
+# The set-up the original version of this package was written for: an RC car
+# with an ESC on output 0, a front steering servo on output 1 and a rear
+# steering servo on output 2 that mirrors the front one (4-wheel steering).
+# Everything is driven from /cmd_vel, so teleop_twist_joy and Nav2 work.
+#
+# The numbers reproduce the old hard-coded values: 100 Hz, throttle 65-125
+# around 90, steering 30-135 around 85, angular.z scaled by (85 - 30) / 3.
+/**:
+  ros__parameters:
+    i2c_bus: 1
+    i2c_address: 64
+    pwm_frequency: 100.0
+    twist_topic: cmd_vel
+    channels: [throttle, steering, rear_steering]
+
+    # The ESC is driven like a servo, in "degrees", exactly as before.  With a
+    # 'continuous' channel you could command it as -1.0 .. 1.0 instead.
+    throttle:
+      channel: 0
+      type: servo
+      home: 90.0                 # ESC neutral
+      home_on_start: true        # send neutral at start-up so the ESC arms
+      min_limit: 65.0
+      max_limit: 125.0
+      timeout: 0.5               # back to neutral if cmd_vel stops (e.g. teleop died)
+      twist:
+        linear_x: 60.0           # degrees per m/s: 90 + linear.x * (125 - 65)
+
+    steering:
+      channel: 1
+      home: 85.0                 # straight ahead
+      home_on_start: true
+      min_limit: 30.0
+      max_limit: 135.0
+      timeout: 0.5
+      twist:
+        angular_z: -18.33        # positive angular.z (turn left) lowers the angle
+
+    rear_steering:
+      channel: 2
+      home: 85.0
+      home_on_start: true
+      min_limit: 35.0            # mirror image of the front limits around 85
+      max_limit: 140.0
+      timeout: 0.5
+      twist:
+        angular_z: 18.33         # opposite direction to the front servo

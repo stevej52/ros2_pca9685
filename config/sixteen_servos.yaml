@@ -1,0 +1,28 @@
+# Sixteen plain servos, one per PCA9685 output, all with default settings
+# (750-2250 us over 0-180 degrees, 50 Hz).  Each one answers on
+#   ~/servoN/angle        (std_msgs/Float64, degrees)
+#   ~/servoN/pulse_width  (std_msgs/Float64, microseconds)
+# Outputs stay off (servo unpowered/limp) until the first command arrives.
+/**:
+  ros__parameters:
+    i2c_bus: 1
+    i2c_address: 64
+    pwm_frequency: 50.0
+    channels: [servo0, servo1, servo2, servo3, servo4, servo5, servo6, servo7,
+               servo8, servo9, servo10, servo11, servo12, servo13, servo14, servo15]
+    servo0: {channel: 0}
+    servo1: {channel: 1}
+    servo2: {channel: 2}
+    servo3: {channel: 3}
+    servo4: {channel: 4}
+    servo5: {channel: 5}
+    servo6: {channel: 6}
+    servo7: {channel: 7}
+    servo8: {channel: 8}
+    servo9: {channel: 9}
+    servo10: {channel: 10}
+    servo11: {channel: 11}
+    servo12: {channel: 12}
+    servo13: {channel: 13}
+    servo14: {channel: 14}
+    servo15: {channel: 15}
