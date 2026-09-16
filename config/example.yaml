@@ -1,0 +1,76 @@
+# Reference configuration for the ros2_pca9685 node.  Every option is shown
+# with its default in the comment.  Copy this file and keep only what you need.
+#
+#   ros2 launch ros2_pca9685 pca9685.launch.py config:=/path/to/my_robot.yaml
+#   ros2 run ros2_pca9685 pca9685_node --ros-args --params-file /path/to/my_robot.yaml
+#
+# "/**" applies the parameters to the node whatever its name or namespace.
+# Numbers should be written with a decimal point (90.0, not 90) so that
+# "ros2 param set" accepts decimals later on.
+/**:
+  ros__parameters:
+    # ---------------------------------------------------------------- board --
+    i2c_bus: 1                         # /dev/i2c-1: Raspberry Pi header pins 3/5    (default 1)
+    i2c_address: 64                    # 64 = 0x40, plus the closed address jumpers   (default 64)
+    pwm_frequency: 50.0                # Hz; 50 suits servos, RC ESCs are fine to 100 (default 50)
+    oscillator_frequency: 25000000.0   # internal clock; tweak if pulses measure long (default 25 MHz)
+    simulate: false                    # true: no hardware, log what would be written (default false)
+
+    # --------------------------------------------------------------- inputs --
+    twist_topic: cmd_vel               # geometry_msgs/Twist for channels with 'twist' gains
+    joint_state_topic: ''              # e.g. joint_states: drive servos from sensor_msgs/JointState
+    joint_state_publish_rate: 0.0      # > 0: publish commanded servo angles on 'joint_states' (Hz)
+
+    # ------------------------------------------------------------- channels --
+    # Every name listed here gets a block of settings below and its own topics:
+    #   ~/<name>/angle        std_msgs/Float64, degrees          (type: servo)
+    #   ~/<name>/throttle     std_msgs/Float64, -1.0 .. 1.0      (type: continuous)
+    #   ~/<name>/duty_cycle   std_msgs/Float64, 0.0 .. 1.0       (type: pwm)
+    #   ~/<name>/pulse_width  std_msgs/Float64, microseconds     (every type; 0 switches off)
+    channels: [pan, tilt, drive, headlight]
+
+    # A standard positional servo with every option spelled out.
+    pan:
+      channel: 0                 # PCA9685 output 0..15                              (required)
+      type: servo                # servo | continuous | pwm                          (default servo)
+      min_pulse_us: 500.0        # pulse width at min_angle                          (default 750)
+      max_pulse_us: 2500.0       # pulse width at max_angle                          (default 2250)
+      min_angle: -90.0           # angle that produces min_pulse_us                  (default 0)
+      max_angle: 90.0            # angle that produces max_pulse_us                  (default 180)
+      min_limit: -80.0           # commands are clamped to these travel limits       (default min_angle)
+      max_limit: 80.0            #                                                   (default max_angle)
+      invert: false              # true mirrors the direction of travel              (default false)
+      home: 0.0                  # angle used at start-up, on timeout and shutdown   (default middle of limits)
+      home_on_start: true        # move to home when the node starts                 (default false: off until commanded)
+      timeout: 0.0               # seconds without a command before going home       (default 0 = never)
+      on_shutdown: "off"         # off | home | hold when the node exits             (default off)
+      joint: pan_joint           # name used in JointState messages                  (default: channel name)
+
+    # Defaults are fine for most hobby servos: 750-2250 us over 0-180 degrees.
+    tilt:
+      channel: 1
+      home: 90.0
+      home_on_start: true
+
+    # An ESC or continuous rotation servo.  Commands are -1.0 (full reverse)
+    # to 1.0 (full forward); 0.0 sends the neutral pulse.
+    drive:
+      channel: 4
+      type: continuous
+      min_pulse_us: 1000.0
+      neutral_pulse_us: 1500.0   # pulse for throttle 0.0                            (default midway)
+      max_pulse_us: 2000.0
+      min_limit: -0.5            # throttle limits                                   (default -1.0 / 1.0)
+      max_limit: 0.5
+      home: 0.0
+      home_on_start: true        # arm the ESC with a neutral signal at start-up
+      timeout: 0.5               # stop if nothing arrives for half a second
+      twist:                     # follow cmd_vel: command = home + sum(gain * axis)
+        linear_x: 0.5            # throttle per m/s (also linear_y/z, angular_x/y/z)
+
+    # Plain PWM, for LEDs or motor driver inputs: 0.0 (off) to 1.0 (fully on).
+    headlight:
+      channel: 15
+      type: pwm
+      invert: false              # true for active-low loads (duty becomes 1 - value)
+      home: 0.0
