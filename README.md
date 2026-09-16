@@ -36,6 +36,10 @@ ros2 topic pub --once /pca9685/pan/angle std_msgs/msg/Float64 "{data: 45.0}"
 - **JointState in and out**: drive servos from `sensor_msgs/JointState`
   (for example from `joint_state_publisher_gui` or MoveIt) and publish the
   commanded angles for `robot_state_publisher` and RViz.
+- **ESC support**: a configurable arming sequence for whatever your speed
+  controller expects at power-up, a dead-band with start offsets so small
+  commands still move the car, and the brake-then-reverse dance that
+  forward/brake/reverse ESCs need.
 - **Safety**: optional home position at start-up, per-channel command
   timeouts, configurable shutdown behaviour, and automatic re-initialisation
   if the chip loses power for a moment.
@@ -153,6 +157,11 @@ with that library carry over.
 | `on_shutdown`       | `off`            | What happens when the node exits: `off` (no more pulses), `home`, or `hold` (keep the last value). Write `"off"` with quotes: YAML reads a bare `off` as false (the node treats that as `off` too). |
 | `joint`             | channel name     | Name used in `JointState` messages.                                                            |
 | `twist.linear_x` … `twist.angular_z` | `0.0` | Gains for following the Twist topic (see below).                                     |
+| `esc.arming.values` / `esc.arming.durations` | none | Continuous only: throttle steps and their lengths in seconds sent at start-up before commands are accepted (see [ESCs](#escs)). |
+| `esc.to_reverse.values` / `esc.to_reverse.durations` | none | Continuous only: steps sent before the first reverse command after driving forward. |
+| `esc.to_forward.values` / `esc.to_forward.durations` | none | Continuous only: steps sent before the first forward command after reversing. |
+| `esc.deadband`      | `0.0`            | Continuous only: commands this close to zero are sent as neutral.                              |
+| `esc.forward_start` / `esc.reverse_start` | `0.0` | Continuous only: the output at which the motor actually starts to move; commands are spread between it and the limit. |
 
 Channel types and their command units:
 
@@ -193,6 +202,85 @@ clamped to the channel's limits. Examples:
 With a `timeout` on every driven channel the robot stops by itself when the
 teleop or navigation node goes away.
 
+## ESCs
+
+A hobby electronic speed controller is not a servo. Three things about it can
+be described on a `continuous` channel under `esc:`. Leave the block out for a
+continuous-rotation servo or a motor driver that behaves like one.
+
+**Arming.** Every ESC waits for a particular signal after power-up before it
+will drive the motor, and they do not agree on what that signal is. Describe
+yours as a list of steps, each a throttle value and a number of seconds. The
+node sends them when it starts, before it accepts commands for the channel,
+and logs `arming the ESC` and `ESC armed`:
+
+```yaml
+    drive:
+      type: continuous
+      esc:
+        arming:                      # most car ESCs: neutral for a couple of seconds
+          values: [0.0]
+          durations: [2.0]
+```
+
+Other procedures you may meet:
+
+```yaml
+        arming:                      # minimum throttle first, then neutral
+          values: [-1.0, 0.0]        # (many brushless ESCs, especially non-car ones)
+          durations: [2.0, 0.5]
+
+        arming:                      # neutral, a small nudge, neutral
+          values: [0.0, 0.05, 0.0]   # (an ESC that ignores a plain neutral signal)
+          durations: [2.5, 0.5, 0.5]
+```
+
+Commands that arrive during the sequence are kept, and the latest one is
+applied when it ends. The sequence runs again by itself after the chip loses
+power, and on request, for example when the ESC was switched on after the
+node:
+
+```bash
+ros2 service call /pca9685/drive/arm std_srvs/srv/Trigger
+```
+
+**Dead-band and start offsets.** ESCs ignore throttle close to neutral, and a
+car usually needs a fair fraction of throttle before it moves at all. With
+`deadband`, commands within that distance of zero are sent as neutral, and
+with `forward_start`/`reverse_start` the remaining commands are spread
+between the point where the motor starts to move and the channel limit, so
+that a small command from Nav2 creeps instead of doing nothing and the limits
+stay the most the ESC is ever sent:
+
+```yaml
+        deadband: 0.03               # 0.03 and below: neutral
+        forward_start: 0.12          # 0.031 -> 0.12 output, max_limit -> max_limit
+        reverse_start: 0.08
+```
+
+Find the numbers with the `pulse_width` topic: the first pulse that moves the
+car, as a fraction of the distance from neutral to the end pulse.
+
+**Reverse on forward/brake/reverse ESCs.** Many car ESCs treat the first
+reverse command after driving forward as a brake, and only reverse after the
+throttle has returned to neutral and been pulled back again. Describe that
+first pull as `to_reverse` steps and the node performs them before every
+reverse that follows a forward run. `to_forward` does the same in the other
+direction for ESCs that need a pause before going forward again:
+
+```yaml
+        to_reverse:                  # brake tap, neutral, then the reverse command
+          values: [-0.3, 0.0]
+          durations: [0.15, 0.15]
+        to_forward:                  # neutral for a moment, then forward
+          values: [0.0]
+          durations: [0.2]
+```
+
+Step values are raw throttle fractions, clamped to the channel limits; the
+dead-band and start offsets only shape commands, not sequence steps. A raw
+`pulse_width` command cancels any running sequence.
+
 ## Topics
 
 All command topics live under the node name (default `/pca9685`) and use
@@ -208,6 +296,7 @@ publisher.
 | `<twist_topic>` (`cmd_vel`)    | in        | `geometry_msgs/msg/Twist`, only subscribed when some channel has `twist` gains. |
 | `<joint_state_topic>`          | in        | `sensor_msgs/msg/JointState`; `position` in radians drives servo channels whose `joint` matches `name`. |
 | `joint_states`                 | out       | `sensor_msgs/msg/JointState` with the commanded servo angles, when `joint_state_publish_rate` is set. |
+| `~/<name>/arm`                 | service   | `std_srvs/srv/Trigger`, continuous channels: run the ESC arming sequence again.  |
 
 Commands are clamped to the limits, written to the chip immediately, and
 logged at debug level (`--ros-args --log-level debug`).
@@ -302,9 +391,11 @@ ros2 topic pub --once /pca9685/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5
   ground, or a board without power on VCC. `i2cdetect -y <bus>` must show `40`.
 - **Servo buzzes or hits an end stop** – lower `max_limit` / raise `min_limit`,
   or calibrate `min_pulse_us`/`max_pulse_us` with the `pulse_width` topic.
-- **ESC does not arm** – it needs a neutral signal for a second or two at
-  power-up: set `home: 0.0` and `home_on_start: true` on a `continuous`
-  channel (or the neutral angle on a `servo` channel).
+- **ESC does not arm** – describe its power-up procedure with `esc.arming`
+  (see [ESCs](#escs)); neutral for two seconds is the usual one. Switch the
+  ESC on before the node, or call the `~/<name>/arm` service afterwards.
+- **Car only brakes when reversing** – add `esc.to_reverse` steps.
+- **Small speeds do nothing** – set `esc.forward_start`/`esc.reverse_start`.
 - **`setup.py install is deprecated` warnings from colcon** – harmless, they
   come from setuptools and affect every Python ROS package.
 
@@ -323,6 +414,9 @@ numbers and limits typed into the source. Everything it did is in
   to. Adjust `home` and the limits if needed.
 - The rear steering servo used to be initialised to 90 but mirrored around 85
   once driving; it now uses one `home` value.
+- The throttle in `config/rc_car.yaml` is a `continuous` channel with an ESC
+  arming sequence instead of a servo commanded in "degrees"; the limits give
+  the same pulses as before.
 - Commands are logged at debug level instead of printing every message.
 
 ## License

@@ -27,6 +27,7 @@ import math
 import re
 from typing import Mapping
 
+from ros2_pca9685.esc import EscConfig, sequence_duration, Step
 from ros2_pca9685.pca9685 import NUM_CHANNELS
 
 SERVO = 'servo'
@@ -40,6 +41,7 @@ SHUTDOWN_HOLD = 'hold'
 SHUTDOWN_MODES = (SHUTDOWN_OFF, SHUTDOWN_HOME, SHUTDOWN_HOLD)
 
 TWIST_AXES = ('linear_x', 'linear_y', 'linear_z', 'angular_x', 'angular_y', 'angular_z')
+ESC_SEQUENCES = ('arming', 'to_reverse', 'to_forward')
 
 NAME_PATTERN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
@@ -62,6 +64,11 @@ CHANNEL_PARAMS: dict[str, object] = {
     'on_shutdown': SHUTDOWN_OFF,
     'joint': '',
     **{f'twist.{axis}': 0.0 for axis in TWIST_AXES},
+    **{f'esc.{name}.values': [] for name in ESC_SEQUENCES},
+    **{f'esc.{name}.durations': [] for name in ESC_SEQUENCES},
+    'esc.deadband': 0.0,
+    'esc.forward_start': 0.0,
+    'esc.reverse_start': 0.0,
 }
 
 _UNITS = {SERVO: 'deg', CONTINUOUS: 'throttle', PWM: 'duty'}
@@ -93,6 +100,7 @@ class ChannelConfig:
     on_shutdown: str
     joint: str
     twist_gains: tuple[tuple[str, float], ...]
+    esc: EscConfig
 
     @property
     def units(self) -> str:
@@ -108,6 +116,11 @@ class ChannelConfig:
     def twist_driven(self) -> bool:
         """Return whether the channel follows the Twist (cmd_vel) topic."""
         return bool(self.twist_gains)
+
+    @property
+    def is_esc(self) -> bool:
+        """Return whether the channel is a continuous channel with ESC behaviour."""
+        return self.kind == CONTINUOUS and self.esc.configured
 
     def clamp(self, value: float) -> float:
         """Limit a command to the configured travel."""
@@ -165,6 +178,13 @@ class ChannelConfig:
         gains = dict(self.twist_gains)
         for axis in TWIST_AXES:
             params[f'twist.{axis}'] = gains.get(axis, 0.0)
+        for name in ESC_SEQUENCES:
+            steps = getattr(self.esc, name)
+            params[f'esc.{name}.values'] = [throttle for throttle, _ in steps]
+            params[f'esc.{name}.durations'] = [seconds for _, seconds in steps]
+        params['esc.deadband'] = self.esc.deadband
+        params['esc.forward_start'] = self.esc.forward_start
+        params['esc.reverse_start'] = self.esc.reverse_start
         return params
 
     def describe(self) -> str:
@@ -187,8 +207,22 @@ class ChannelConfig:
             parts.append(f'twist {gains}')
         if self.joint != self.name:
             parts.append(f'joint {self.joint}')
+        if self.is_esc:
+            parts.append(self._describe_esc())
         parts.append(f'on shutdown {self.on_shutdown}')
         return ', '.join(parts)
+
+    def _describe_esc(self) -> str:
+        details = []
+        for name in ESC_SEQUENCES:
+            steps = getattr(self.esc, name)
+            if steps:
+                details.append(f'{name} {len(steps)} step(s) {sequence_duration(steps):g} s')
+        if self.esc.deadband > 0.0:
+            details.append(f'deadband {self.esc.deadband:g}')
+        if self.esc.forward_start > 0.0 or self.esc.reverse_start > 0.0:
+            details.append(f'starts {self.esc.forward_start:g}/{self.esc.reverse_start:g}')
+        return 'ESC ' + ' '.join(details)
 
 
 def validate_channel_name(name: object) -> str:
@@ -225,6 +259,22 @@ def parse_channel(name: str, values: Mapping[str, object]) -> ChannelConfig:
         if not math.isfinite(value):
             raise ConfigError(f"'{name}.{key}' must be a finite number")
         return float(value)
+
+    def numbers(key: str) -> list[float]:
+        value = raw(key)
+        if isinstance(value, (str, bytes)) and len(value) > 0:
+            raise ConfigError(f"'{name}.{key}' must be a list of numbers, got {value!r}")
+        try:
+            items = list(value)
+        except TypeError:
+            raise ConfigError(f"'{name}.{key}' must be a list of numbers, got {value!r}") from None
+        result = []
+        for item in items:
+            if isinstance(item, bool) or not isinstance(item, (int, float)) \
+                    or not math.isfinite(item):
+                raise ConfigError(f"'{name}.{key}' must be a list of numbers, got {value!r}")
+            result.append(float(item))
+        return result
 
     def boolean(key: str) -> bool:
         value = raw(key)
@@ -312,6 +362,49 @@ def parse_channel(name: str, values: Mapping[str, object]) -> ChannelConfig:
         if gain != 0.0:
             twist_gains.append((axis, gain))
 
+    sequences: dict[str, tuple[Step, ...]] = {}
+    for sequence in ESC_SEQUENCES:
+        throttles = numbers(f'esc.{sequence}.values')
+        durations = numbers(f'esc.{sequence}.durations')
+        if len(throttles) != len(durations):
+            raise ConfigError(
+                f"'{name}.esc.{sequence}.values' and '{name}.esc.{sequence}.durations' "
+                'must have the same number of entries')
+        for throttle, seconds in zip(throttles, durations):
+            if not -1.0 <= throttle <= 1.0:
+                raise ConfigError(
+                    f"'{name}.esc.{sequence}.values' must lie between -1 and 1, got {throttle:g}")
+            if seconds <= 0.0:
+                raise ConfigError(
+                    f"'{name}.esc.{sequence}.durations' must be positive, got {seconds:g}")
+        sequences[sequence] = tuple(zip(throttles, durations))
+    esc = EscConfig(
+        arming=sequences['arming'],
+        to_reverse=sequences['to_reverse'],
+        to_forward=sequences['to_forward'],
+        deadband=number('esc.deadband'),
+        forward_start=number('esc.forward_start'),
+        reverse_start=number('esc.reverse_start'),
+    )
+    if esc.configured:
+        if kind != CONTINUOUS:
+            raise ConfigError(
+                f"'{name}.esc' settings only apply to continuous channels, not to {kind}")
+        if not 0.0 <= esc.deadband < 1.0:
+            raise ConfigError(f"'{name}.esc.deadband' must lie between 0 and 1")
+        for key, start, extent in (('forward_start', esc.forward_start, max_limit),
+                                   ('reverse_start', esc.reverse_start, -min_limit)):
+            if not 0.0 <= start <= 1.0:
+                raise ConfigError(f"'{name}.esc.{key}' must lie between 0 and 1")
+            if extent > 0.0 and start >= extent:
+                raise ConfigError(
+                    f"'{name}.esc.{key}' ({start:g}) must be below the limit in that "
+                    f'direction ({extent:g})')
+            if extent > 0.0 and esc.deadband >= extent:
+                raise ConfigError(
+                    f"'{name}.esc.deadband' ({esc.deadband:g}) must be below the limit in "
+                    f'that direction ({extent:g})')
+
     return ChannelConfig(
         name=name,
         channel=int(channel),
@@ -330,6 +423,7 @@ def parse_channel(name: str, values: Mapping[str, object]) -> ChannelConfig:
         on_shutdown=on_shutdown,
         joint=joint,
         twist_gains=tuple(twist_gains),
+        esc=esc,
     )
 
 

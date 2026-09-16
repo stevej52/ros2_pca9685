@@ -23,6 +23,7 @@ optionally follows a ``geometry_msgs/Twist`` topic, and can be driven from
 
 from __future__ import annotations
 
+import array
 from dataclasses import dataclass
 import math
 import signal
@@ -39,10 +40,12 @@ from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from ros2_pca9685 import channels, pca9685
+from ros2_pca9685.esc import EscSequencer, sequence_duration
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
+from std_srvs.srv import Trigger
 
-WATCHDOG_PERIOD = 0.05  # seconds between timeout checks
+WATCHDOG_PERIOD = 0.02  # seconds between timeout checks and ESC sequence steps
 HEALTH_CHECK_PERIOD = 2.0  # seconds between checks that the chip kept its configuration
 
 # Node-wide parameters and their defaults.  ``channels`` has no default: it
@@ -76,6 +79,8 @@ class _ChannelState:
     value: float | None = None  # last command in the channel's units; None = output off
     pulse_us: float | None = None  # set instead of ``value`` after a raw pulse width command
     stamp: Time | None = None  # when the last command arrived, for the timeout
+    sequencer: EscSequencer | None = None  # ESC behaviour, continuous channels only
+    written: float | None = None  # throttle last sent to an ESC, to skip unchanged writes
 
     @property
     def active(self) -> bool:
@@ -90,21 +95,38 @@ def _twist_axes(msg: Twist) -> dict[str, float]:
     }
 
 
+def _plain(value: object) -> object:
+    """Turn parameter arrays into lists so that values compare by content."""
+    if isinstance(value, (list, tuple, bytes, array.array)):
+        return list(value)
+    return value
+
+
 class Pca9685Node(Node):
     """Drive the outputs of a PCA9685 from ROS topics."""
 
     def __init__(self, node_name: str = 'pca9685', **kwargs) -> None:
-        super().__init__(
-            node_name, automatically_declare_parameters_from_overrides=True, **kwargs)
+        try:
+            super().__init__(
+                node_name, automatically_declare_parameters_from_overrides=True, **kwargs)
+        except ValueError as exc:
+            if 'PARAMETER_NOT_SET' not in str(exc):
+                raise
+            raise channels.ConfigError(
+                'A parameter in the configuration has no usable value (an empty list such as '
+                '"values: []", for example): leave the key out instead') from exc
         self.bus = None
         self.pca: pca9685.Pca9685 | None = None
         self._config_dirty = False
         self._command_subscriptions = []
+        self._services = []
 
         self._names = self._declare_parameters()
         self._settings = self._read_settings()
         self._configs = self._read_channel_configs()
         self._states = {name: _ChannelState() for name in self._configs}
+        for name, config in self._configs.items():
+            self._update_sequencer(name, config)
         self._write_back_resolved_defaults()
         self._joint_to_channel = {
             config.joint: name for name, config in self._configs.items()
@@ -119,6 +141,9 @@ class Pca9685Node(Node):
                 Float64, f'~/{name}/{config.command_topic}', self._value_callback(name), qos))
             self._command_subscriptions.append(self.create_subscription(
                 Float64, f'~/{name}/pulse_width', self._pulse_callback(name), qos))
+            if config.kind == channels.CONTINUOUS:
+                self._services.append(self.create_service(
+                    Trigger, f'~/{name}/arm', self._arm_callback(name)))
         if any(config.twist_driven for config in self._configs.values()):
             self._command_subscriptions.append(self.create_subscription(
                 Twist, self._settings['twist_topic'], self._on_twist, qos))
@@ -134,7 +159,10 @@ class Pca9685Node(Node):
 
         for name, config in self._configs.items():
             self.get_logger().info(f'{name}: {config.describe()}')
-            if config.home_on_start:
+            if config.esc.arming:
+                self._states[name].value = config.home
+                self._start_arming(name)
+            elif config.home_on_start:
                 self._command(name, config.home, 'home_on_start', stamp=False)
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.get_logger().info(
@@ -271,7 +299,7 @@ class Pca9685Node(Node):
         for name, config in self._configs.items():
             for key, value in config.as_params().items():
                 full_name = f'{name}.{key}'
-                if self.get_parameter(full_name).value != value:
+                if _plain(self.get_parameter(full_name).value) != _plain(value):
                     updates.append(Parameter(full_name, value=value))
         if updates:
             self.set_parameters(updates)
@@ -309,6 +337,7 @@ class Pca9685Node(Node):
         for name, config in configs.items():
             if config != self._configs[name]:
                 self._configs[name] = config
+                self._update_sequencer(name, config)
                 changed.append(name)
                 self.get_logger().info(f'{name}: {config.describe()}')
             state = self._states[name]
@@ -328,6 +357,16 @@ class Pca9685Node(Node):
         for name in changed:
             if self._states[name].active:
                 self._apply(name, 'parameter change')
+
+    def _update_sequencer(self, name: str, config: channels.ChannelConfig) -> None:
+        """Create, update or drop the ESC sequencer of a channel to match its configuration."""
+        state = self._states[name]
+        if not config.is_esc:
+            state.sequencer = None
+        elif state.sequencer is None:
+            state.sequencer = EscSequencer(config.esc, config.min_limit, config.max_limit)
+        else:
+            state.sequencer.reconfigure(config.esc, config.min_limit, config.max_limit)
 
     # ------------------------------------------------------------------ hardware --
 
@@ -360,6 +399,39 @@ class Pca9685Node(Node):
         self.pca.set_pulse_width_us(config.channel, pulse_us)
         return f'{value:g} {config.units} = {pulse_us:.0f} us'
 
+    def _write_esc(self, name: str) -> str:
+        """Let the ESC sequencer decide what to send now, write it, and describe it."""
+        config = self._configs[name]
+        state = self._states[name]
+        state.sequencer.set_wanted(state.value)
+        output = self._advance_esc(name)
+        pulse_us = config.pulse_width_us(output)
+        if output != state.written:
+            self.pca.set_pulse_width_us(config.channel, pulse_us)
+            state.written = output
+        detail = f'{state.value:g} -> {output:g} throttle = {pulse_us:.0f} us'
+        if state.sequencer.busy:
+            detail += f' (held during {state.sequencer.sequence})'
+        return detail
+
+    def _advance_esc(self, name: str) -> float:
+        """Advance a channel's ESC sequencer to now and log sequence changes."""
+        sequencer = self._states[name].sequencer
+        before = sequencer.sequence
+        output = sequencer.output(self._now_seconds())
+        after = sequencer.sequence
+        if before != after:
+            if before == 'arming':
+                self.get_logger().info(f'{name}: ESC armed')
+            elif before:
+                self.get_logger().debug(f'{name}: {before} sequence finished')
+            if after and after != 'arming':
+                self.get_logger().debug(f'{name}: {after} sequence started')
+        return output
+
+    def _now_seconds(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
     def _apply(self, name: str, source: str) -> None:
         """Write the stored state of a channel to the chip."""
         config = self._configs[name]
@@ -370,7 +442,10 @@ class Pca9685Node(Node):
                 detail = f'{state.pulse_us:g} us'
             elif state.value is None:
                 self.pca.set_off(config.channel)
+                state.written = None
                 detail = 'off'
+            elif state.sequencer is not None:
+                detail = self._write_esc(name)
             else:
                 detail = self._write_output(config, state.value)
         except OSError as exc:
@@ -379,9 +454,44 @@ class Pca9685Node(Node):
         log = self.get_logger().info if self._settings['simulate'] else self.get_logger().debug
         log(f'{name}: {detail} ({source})')
 
+    def _tick_esc(self, name: str) -> None:
+        """Send the next step of a running ESC sequence, or the command once it is over."""
+        config = self._configs[name]
+        state = self._states[name]
+        if state.sequencer is None or state.value is None or state.pulse_us is not None:
+            return
+        output = self._advance_esc(name)
+        if output == state.written:
+            return
+        pulse_us = config.pulse_width_us(output)
+        try:
+            self.pca.set_pulse_width_us(config.channel, pulse_us)
+        except OSError as exc:
+            self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
+            return
+        state.written = output
+        source = state.sequencer.sequence or 'sequence finished'
+        log = self.get_logger().info if self._settings['simulate'] else self.get_logger().debug
+        log(f'{name}: {output:g} throttle = {pulse_us:.0f} us ({source})')
+
+    def _start_arming(self, name: str) -> None:
+        config = self._configs[name]
+        state = self._states[name]
+        state.sequencer.arm(self._now_seconds())
+        self.get_logger().info(
+            f'{name}: arming the ESC ({len(config.esc.arming)} step(s), '
+            f'{sequence_duration(config.esc.arming):g} s)')
+        self._apply(name, 'arming')
+
     def _reapply_all(self, source: str) -> None:
         for name, state in self._states.items():
-            if state.active:
+            if not state.active:
+                continue
+            state.written = None
+            if state.sequencer is not None and self._configs[name].esc.arming \
+                    and state.pulse_us is None:
+                self._start_arming(name)  # the ESC lost its signal, so it needs arming again
+            else:
                 self._apply(name, source)
 
     def _check_board(self) -> None:
@@ -426,6 +536,9 @@ class Pca9685Node(Node):
                 f'{name}: ignoring non-finite pulse width from {source}',
                 throttle_duration_sec=5.0)
             return
+        if state.sequencer is not None:
+            state.sequencer.cancel()  # raw pulses bypass the ESC logic entirely
+        state.written = None
         state.value = None
         state.pulse_us = pulse_us if pulse_us > 0.0 else None
         state.stamp = self.get_clock().now() if state.pulse_us is not None else None
@@ -439,6 +552,25 @@ class Pca9685Node(Node):
     def _pulse_callback(self, name: str):
         def callback(msg: Float64) -> None:
             self._command_pulse(name, msg.data, 'pulse_width topic')
+        return callback
+
+    def _arm_callback(self, name: str):
+        def callback(request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+            config = self._configs[name]
+            state = self._states[name]
+            if state.sequencer is None or not config.esc.arming:
+                response.success = False
+                response.message = f"'{name}' has no esc.arming sequence configured"
+                return response
+            state.pulse_us = None
+            if state.value is None:
+                state.value = config.home
+            self._start_arming(name)
+            response.success = True
+            response.message = (
+                f'arming {name}: {len(config.esc.arming)} step(s), '
+                f'{sequence_duration(config.esc.arming):g} s')
+            return response
         return callback
 
     def _on_twist(self, msg: Twist) -> None:
@@ -475,6 +607,8 @@ class Pca9685Node(Node):
                     f'{name}: no command for {config.timeout:g} s, returning to home '
                     f'({config.home:g} {config.units})')
                 self._command(name, config.home, 'timeout', stamp=False)
+        for name in self._configs:
+            self._tick_esc(name)
         if self._config_dirty:
             self._config_dirty = False
             self._reload_configuration()
