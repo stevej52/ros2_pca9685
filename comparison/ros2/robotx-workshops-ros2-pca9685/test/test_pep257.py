@@ -19,7 +19,5 @@ import pytest
 @pytest.mark.linter
 @pytest.mark.pep257
 def test_pep257():
-    # Explicit paths: ament_pep257 does not honour AMENT_IGNORE, and the
-    # comparison/ directory holds third-party code with its own style.
-    rc = main(argv=['ros2_pca9685', 'launch', 'setup.py', 'test'])
+    rc = main(argv=['.', 'test'])
     assert rc == 0, 'Found code style errors / warnings'
