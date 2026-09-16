@@ -1,0 +1,7 @@
+<launch>
+  <node name="pca9685" pkg="pca9685" type="pca9685_node" output="screen" >
+    <param name="i2c_bus" value="2" />
+    <param name="i2c_address" value="0x40"/>
+    <param name="frequency" value="50"/>
+  </node>
+</launch>

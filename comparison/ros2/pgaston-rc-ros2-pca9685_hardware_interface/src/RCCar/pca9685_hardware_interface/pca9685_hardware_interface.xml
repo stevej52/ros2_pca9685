@@ -1,0 +1,8 @@
+<library path="pca9685_hardware_interface">
+  <class name="pca9685_hardware_interface/Pca9685SystemHardware"
+         type="pca9685_hardware_interface::Pca9685SystemHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      The ros2_control PCA9685 is using a system hardware interface-type. It publishes PWM commands (which are mapped to velocities.) </description>
+  </class>
+</library>

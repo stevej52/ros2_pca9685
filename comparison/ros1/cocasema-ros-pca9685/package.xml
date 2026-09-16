@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>pca9685</name>
+  <version>1.0.0</version>
+  <description>PCA9685 driver (16-Channel 12-bit PWM Driver with I2C interface)</description>
+
+  <author email="github@cocasema.com">cocasema</author>
+  <maintainer email="github@cocasema.com">cocasema</maintainer>
+  <license>MIT</license>
+
+  <url type="github">https://github.com/cocasema/ros-pca9685</url>
+  <url type="datasheet">http://www.nxp.com/documents/data_sheet/PCA9685.pdf</url>
+  <url type="adafruit">http://www.adafruit.com/products/815</url>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>pwm_msgs</depend>
+
+  <build_depend>message_generation</build_depend>
+
+  <exec_depend>message_runtime</exec_depend>
+</package>

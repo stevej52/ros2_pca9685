@@ -1,0 +1,18 @@
+<launch>
+  <rosparam>
+    servos:
+      pwm_frequency: 50
+      throttle:
+        channel: 0
+        center: 320
+        direction: 1
+        range: 120
+      steering:
+        channel: 1
+        center: 325
+        direction: 1
+        range: 160
+  </rosparam>
+
+  <node pkg="pca9685_board" name="pca9685_board_node" type="pca9685_board_node" output="screen" />
+</launch>
