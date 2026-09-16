@@ -3,8 +3,10 @@
 # steering servo on output 2 that mirrors the front one (4-wheel steering).
 # Everything is driven from /cmd_vel, so teleop_twist_joy and Nav2 work.
 #
-# The numbers reproduce the old hard-coded values: 100 Hz, throttle 65-125
-# around 90, steering 30-135 around 85, angular.z scaled by (85 - 30) / 3.
+# The steering numbers reproduce the old hard-coded values: 100 Hz, steering
+# 30-135 around 85, angular.z scaled by (85 - 30) / 3. The throttle is now a
+# proper ESC channel: the old 65-125 "degrees" around 90 were pulses of about
+# 1292-1792 us around 1500 us, which is what the limits below give.
 /**:
   ros__parameters:
     i2c_bus: 1
@@ -13,18 +15,41 @@
     twist_topic: cmd_vel
     channels: [throttle, steering, rear_steering]
 
-    # The ESC is driven like a servo, in "degrees", exactly as before.  With a
-    # 'continuous' channel you could command it as -1.0 .. 1.0 instead.
     throttle:
       channel: 0
-      type: servo
-      home: 90.0                 # ESC neutral
-      home_on_start: true        # send neutral at start-up so the ESC arms
-      min_limit: 65.0
-      max_limit: 125.0
+      type: continuous
+      min_pulse_us: 1000.0       # full reverse
+      neutral_pulse_us: 1500.0   # stop
+      max_pulse_us: 2000.0       # full forward
+      min_limit: -0.42           # -0.42 * 500 us = about 1292 us, the old lower limit
+      max_limit: 0.58            #  0.58 * 500 us = about 1792 us, the old upper limit
+      home: 0.0                  # neutral
       timeout: 0.5               # back to neutral if cmd_vel stops (e.g. teleop died)
       twist:
-        linear_x: 60.0           # degrees per m/s: 90 + linear.x * (125 - 65)
+        linear_x: 1.0            # throttle per m/s: 0.5 m/s = 0.5 = 1750 us
+      esc:
+        # What the ESC must see after power-up before it drives the motor.
+        # The old code held neutral for a second; two seconds is safer.
+        arming:
+          values: [0.0]
+          durations: [2.0]
+        # Other ESCs want other things. Replace the two lines above with one
+        # of these if yours does not arm:
+        #   values: [-1.0, 0.0]          # minimum throttle first, then neutral
+        #   durations: [2.0, 0.5]
+        #   values: [0.0, 0.05, 0.0]     # neutral, a small nudge, neutral
+        #   durations: [2.5, 0.5, 0.5]
+        # Commands this close to zero are sent as neutral instead:
+        deadband: 0.02
+        # If the car only brakes when you pull back and needs a second pull
+        # to reverse, describe the first pull here and the node does it for
+        # you: a short reverse tap, neutral, then the reverse command.
+        #   to_reverse:
+        #     values: [-0.3, 0.0]
+        #     durations: [0.15, 0.15]
+        # If the motor only starts moving at, say, 12 % throttle, set
+        # forward_start: 0.12 (and reverse_start) and small commands will
+        # still move the car.
 
     steering:
       channel: 1

@@ -28,6 +28,7 @@ from ros2_pca9685.channels import ConfigError
 from ros2_pca9685.pca9685_node import Pca9685Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
+from std_srvs.srv import Trigger
 
 BASE_PARAMS = {
     'simulate': True,
@@ -308,3 +309,123 @@ def test_configuration_errors_are_reported(ros_context, params, message):
     overrides = [Parameter(name, value=value) for name, value in params.items()]
     with pytest.raises(ConfigError, match=message):
         Pca9685Node(f'pca9685_test_{next(_counter)}', parameter_overrides=overrides)
+
+
+ESC_PARAMS = {
+    'simulate': True,
+    'channels': ['drive', 'plain'],
+    'drive.channel': 0,
+    'drive.type': 'continuous',
+    'drive.min_pulse_us': 1000.0,
+    'drive.max_pulse_us': 2000.0,
+    'drive.esc.arming.values': [0.0, 0.1],
+    'drive.esc.arming.durations': [0.4, 0.2],
+    'drive.esc.to_reverse.values': [-0.3, 0.0],
+    'drive.esc.to_reverse.durations': [0.2, 0.2],
+    'drive.esc.deadband': 0.05,
+    'drive.esc.forward_start': 0.2,
+    'plain.channel': 1,
+    'plain.type': 'continuous',
+}
+
+# 0.5 throttle shaped for a 0.05 dead-band and a 0.2 forward start.
+FORWARD_HALF = 0.2 + (0.5 - 0.05) / 0.95 * 0.8
+# -0.4 throttle shaped for the dead-band alone.
+REVERSE_04 = -(0.4 - 0.05) / 0.95
+
+
+@pytest.fixture
+def esc_harness(ros_context):
+    harness = Harness(ESC_PARAMS)
+    yield harness
+    harness.close()
+
+
+def wait_for_arming(harness):
+    """Command half throttle and wait until the arming steps have played out."""
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=0.5),
+                    lambda: harness.state(0) == harness.ticks_for_pulse(1550.0))
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=0.5),
+                    lambda: harness.state(0) == forward_half_ticks(harness))
+
+
+def forward_half_ticks(harness):
+    return harness.ticks_for_pulse(1500.0 + 500.0 * FORWARD_HALF)
+
+
+def reverse_04_ticks(harness):
+    return harness.ticks_for_pulse(1500.0 + 500.0 * REVERSE_04)
+
+
+def test_esc_arms_at_startup_then_applies_the_command(esc_harness):
+    harness = esc_harness
+    assert harness.state(0) == harness.ticks_for_pulse(1500.0)  # first arming step: neutral
+    assert harness.state(1) == 'off'  # a plain continuous channel waits for a command
+    wait_for_arming(harness)
+    assert harness.node._states['drive'].sequencer.busy is False
+    assert harness.node._states['drive'].sequencer.mode == 'forward'
+    topics = dict(harness.node.get_topic_names_and_types())
+    assert topics[f'/{harness.name}/drive/throttle'] == ['std_msgs/msg/Float64']
+    services = dict(harness.node.get_service_names_and_types())
+    assert services[f'/{harness.name}/drive/arm'] == ['std_srvs/srv/Trigger']
+
+
+def test_esc_reverse_entry_sequence(esc_harness):
+    harness = esc_harness
+    wait_for_arming(harness)
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=-0.4),
+                    lambda: harness.state(0) == harness.ticks_for_pulse(1350.0))  # brake tap
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=-0.4),
+                    lambda: harness.state(0) == harness.ticks_for_pulse(1500.0))  # neutral
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=-0.4),
+                    lambda: harness.state(0) == reverse_04_ticks(harness))
+    assert harness.node._states['drive'].sequencer.mode == 'reverse'
+    # Forward again is direct: no to_forward sequence is configured.
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=0.5),
+                    lambda: harness.state(0) == forward_half_ticks(harness))
+    assert harness.node._states['drive'].sequencer.mode == 'forward'
+
+
+def call_arm(harness, channel):
+    client = harness.helper.create_client(Trigger, harness.topic(channel, 'arm'))
+    assert harness.wait_for(lambda: client.service_is_ready())
+    future = client.call_async(Trigger.Request())
+    assert harness.wait_for(future.done)
+    harness.helper.destroy_client(client)
+    return future.result()
+
+
+def test_arm_service_restarts_the_arming_sequence(esc_harness):
+    harness = esc_harness
+    wait_for_arming(harness)
+    result = call_arm(harness, 'drive')
+    assert result.success is True
+    assert 'arming drive: 2 step(s), 0.6 s' == result.message
+    assert harness.state(0) == harness.ticks_for_pulse(1500.0)
+    assert harness.node._states['drive'].sequencer.sequence == 'arming'
+    assert harness.wait_for(lambda: harness.state(0) == harness.ticks_for_pulse(1550.0))
+    assert harness.wait_for(lambda: harness.state(0) == forward_half_ticks(harness))
+    result = call_arm(harness, 'plain')
+    assert result.success is False
+    assert 'no esc.arming sequence' in result.message
+
+
+def test_esc_rearms_after_a_chip_reset(esc_harness):
+    harness = esc_harness
+    wait_for_arming(harness)
+    harness.bus.registers[0x00] = 0x11  # power-on MODE1: sleeping, all-call on
+    harness.bus.registers[0xFE] = 0x1E
+    harness.bus.registers[0x06:0x46] = bytes(0x40)  # the outputs are gone too
+    assert harness.wait_for(
+        lambda: harness.state(0) == harness.ticks_for_pulse(1550.0), timeout=4.0)
+    assert harness.wait_for(lambda: harness.state(0) == forward_half_ticks(harness))
+    assert harness.node.pca.is_configured()
+
+
+def test_raw_pulse_cancels_esc_sequences(esc_harness):
+    harness = esc_harness
+    harness.publish(harness.topic('drive', 'pulse_width'), Float64, Float64(data=1700.0),
+                    lambda: harness.state(0) == harness.ticks_for_pulse(1700.0))
+    assert harness.node._states['drive'].sequencer.busy is False
+    harness.spin(0.7)
+    assert harness.state(0) == harness.ticks_for_pulse(1700.0)

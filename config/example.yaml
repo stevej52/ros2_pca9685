@@ -63,10 +63,22 @@
       min_limit: -0.5            # throttle limits                                   (default -1.0 / 1.0)
       max_limit: 0.5
       home: 0.0
-      home_on_start: true        # arm the ESC with a neutral signal at start-up
       timeout: 0.5               # stop if nothing arrives for half a second
       twist:                     # follow cmd_vel: command = home + sum(gain * axis)
         linear_x: 0.5            # throttle per m/s (also linear_y/z, angular_x/y/z)
+      esc:                       # ESC behaviour; leave out for a continuous rotation servo
+        arming:                  # steps sent at start-up (and on the ~/drive/arm service)
+          values: [0.0]          #   throttle for each step                      (default none)
+          durations: [2.0]       #   seconds for each step
+        to_reverse:              # steps before the first reverse after driving forward
+          values: [-0.3, 0.0]    #   here: brake tap, neutral, then reverse    (default none)
+          durations: [0.15, 0.15]
+        # to_forward:            # steps before the first forward after reversing; leave
+        #   values: [0.0]        #   the whole block out to disable it (an empty list
+        #   durations: [0.2]     #   is not allowed in a ROS 2 parameter file)
+        deadband: 0.02           # commands this close to 0 are sent as neutral (default 0)
+        forward_start: 0.12      # output where the motor starts moving forward (default 0)
+        reverse_start: 0.12      # same for reverse                             (default 0)
 
     # Plain PWM, for LEDs or motor driver inputs: 0.0 (off) to 1.0 (fully on).
     headlight:

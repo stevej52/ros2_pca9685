@@ -17,6 +17,7 @@
 import pytest
 from ros2_pca9685.channels import CHANNEL_PARAMS, ConfigError, CONTINUOUS, parse_channel, \
     parse_channels, PWM, SERVO, TWIST_AXES
+from ros2_pca9685.esc import EscConfig
 
 
 def test_defaults():
@@ -215,3 +216,61 @@ def test_parse_channels_detects_conflicts():
     configs = parse_channels({'a': {'channel': 0}, 'b': {'channel': 1}})
     assert list(configs) == ['a', 'b']
     assert configs['b'].channel == 1
+
+
+def test_esc_settings_are_parsed_for_continuous_channels():
+    values = {
+        'channel': 0, 'type': CONTINUOUS, 'max_limit': 0.6,
+        'esc.arming.values': [0.0, 0.05, 0.0], 'esc.arming.durations': [2.5, 0.5, 0.5],
+        'esc.to_reverse.values': [-0.3, 0.0], 'esc.to_reverse.durations': [0.2, 0.2],
+        'esc.deadband': 0.03, 'esc.forward_start': 0.27, 'esc.reverse_start': 0.05}
+    config = parse_channel('drive', values)
+    assert config.is_esc is True
+    assert config.esc == EscConfig(
+        arming=((0.0, 2.5), (0.05, 0.5), (0.0, 0.5)), to_reverse=((-0.3, 0.2), (0.0, 0.2)),
+        deadband=0.03, forward_start=0.27, reverse_start=0.05)
+    assert 'ESC arming 3 step(s) 3.5 s to_reverse 2 step(s) 0.4 s deadband 0.03 starts 0.27/0.05' \
+        in config.describe()
+    params = config.as_params()
+    assert params['esc.arming.values'] == [0.0, 0.05, 0.0]
+    assert params['esc.to_forward.durations'] == []
+    assert parse_channel('drive', params) == config
+    plain = parse_channel('drive', {'channel': 0, 'type': CONTINUOUS})
+    assert plain.is_esc is False
+    assert plain.esc == EscConfig()
+    assert 'ESC' not in plain.describe()
+
+
+def test_esc_arrays_accept_integers_and_array_types():
+    import array
+    values = {'channel': 0, 'type': CONTINUOUS,
+              'esc.arming.values': array.array('d', [0.0]), 'esc.arming.durations': [2]}
+    assert parse_channel('drive', values).esc.arming == ((0.0, 2.0),)
+
+
+@pytest.mark.parametrize('values, message', [
+    ({'channel': 0, 'esc.deadband': 0.1}, 'only apply to continuous'),
+    ({'channel': 0, 'type': PWM, 'esc.arming.values': [0.0], 'esc.arming.durations': [1.0]},
+     'only apply to continuous'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.arming.values': [0.0, 0.1],
+      'esc.arming.durations': [1.0]}, 'same number of entries'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.arming.values': [1.5],
+      'esc.arming.durations': [1.0]}, 'between -1 and 1'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.to_forward.values': [0.0],
+      'esc.to_forward.durations': [0.0]}, 'must be positive'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.arming.values': 'neutral',
+      'esc.arming.durations': [1.0]}, 'list of numbers'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.arming.values': [True],
+      'esc.arming.durations': [1.0]}, 'list of numbers'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.deadband': 1.0}, 'deadband'),
+    ({'channel': 0, 'type': CONTINUOUS, 'esc.forward_start': 1.5}, 'forward_start'),
+    ({'channel': 0, 'type': CONTINUOUS, 'max_limit': 0.3, 'esc.forward_start': 0.3},
+     'below the limit'),
+    ({'channel': 0, 'type': CONTINUOUS, 'min_limit': -0.2, 'esc.reverse_start': 0.25},
+     'below the limit'),
+    ({'channel': 0, 'type': CONTINUOUS, 'max_limit': 0.1, 'esc.deadband': 0.1},
+     'deadband'),
+])
+def test_invalid_esc_settings_are_reported(values, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_channel('drive', values)
