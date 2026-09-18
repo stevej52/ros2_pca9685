@@ -51,7 +51,10 @@ ros2 topic pub --once /pca9685/pan/angle std_msgs/msg/Float64 "{data: 45.0}"
 
 ## Requirements
 
-- ROS 2 Humble, Jazzy, Kilted or newer (Python 3.10+).
+- ROS 2 Humble, Jazzy, Kilted or newer (Python 3.10+). To set up a PC and a
+  Jetson Orin Nano from scratch on Ubuntu 24.04 + ROS 2 Jazzy, see
+  [robot-environment](https://github.com/stevej52/robot-environment); its
+  install script clones this driver into `~/ros2_ws/src` and builds it.
 - A Linux board with an I2C bus: Raspberry Pi (enable I2C with
   `sudo raspi-config` → Interface Options), NVIDIA Jetson, etc.
 - Permission to use the bus: `sudo usermod -aG i2c $USER`, then log out and
@@ -385,8 +388,9 @@ ros2 topic pub --once /pca9685/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5
   Requirements) or run the node with `sudo -E`.
 - **`/dev/i2c-1 does not exist`** – enable I2C in `raspi-config`, or pick the
   right `i2c_bus`. On a Jetson Nano the 40-pin header carries bus 1 on pins
-  3/5 and bus 0 on pins 27/28; other Jetsons number them differently, so
-  check `ls /dev/i2c-*` and `i2cdetect -y <bus>`.
+  3/5 and bus 0 on pins 27/28; on a Jetson Orin Nano (JetPack 5/6) pins 3/5
+  are bus 7 and pins 27/28 are bus 1; other Jetsons and JetPack releases
+  number them differently, so check `i2cdetect -l` and `i2cdetect -y <bus>`.
 - **`No response from the PCA9685`** – wrong bus, wrong address, missing
   ground, or a board without power on VCC. `i2cdetect -y <bus>` must show `40`.
 - **Servo buzzes or hits an end stop** – lower `max_limit` / raise `min_limit`,
