@@ -354,6 +354,10 @@ class Pca9685Node(Node):
                 f'PWM frequency is now {actual:.2f} Hz '
                 f"(requested {settings['pwm_frequency']:g} Hz)")
             changed = list(self._configs)
+            for state in self._states.values():
+                # every output was switched off with the frequency: an ESC whose
+                # throttle has not changed must be written again all the same
+                state.written = None
         for name in changed:
             if self._states[name].active:
                 self._apply(name, 'parameter change')
