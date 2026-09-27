@@ -538,6 +538,12 @@ class Pca9685Node(Node):
             state.changed_at = self.get_clock().now()
             state.relaxed = False
             state.relax_plan = []
+        elif state.relax_plan and state.pulse_us is None:
+            # the same value again while the settle wiggle is under way (a
+            # cmd_vel stream): keep the stamp fresh but do not cut the wiggle
+            # short by rewriting the value over it
+            state.stamp = self.get_clock().now() if stamp else None
+            return
         state.value = clamped
         state.pulse_us = None
         state.stamp = self.get_clock().now() if stamp else None
