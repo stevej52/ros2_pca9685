@@ -24,7 +24,7 @@ optionally follows a ``geometry_msgs/Twist`` topic, and can be driven from
 from __future__ import annotations
 
 import array
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import signal
 import sys
@@ -35,6 +35,7 @@ from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.logging import get_logger
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -81,6 +82,9 @@ class _ChannelState:
     stamp: Time | None = None  # when the last command arrived, for the timeout
     sequencer: EscSequencer | None = None  # ESC behaviour, continuous channels only
     written: float | None = None  # throttle last sent to an ESC, to skip unchanged writes
+    changed_at: Time | None = None  # when ``value`` last changed (for the settle wiggle)
+    relaxed: bool = True  # the wiggle has been done for the current value
+    relax_plan: list = field(default_factory=list)  # pending (due Time, angle) steps of a wiggle
 
     @property
     def active(self) -> bool:
@@ -530,6 +534,10 @@ class Pca9685Node(Node):
         clamped = config.clamp(value)
         if clamped != value:
             self.get_logger().debug(f'{name}: {value:g} clamped to {clamped:g} {config.units}')
+        if clamped != state.value:
+            state.changed_at = self.get_clock().now()
+            state.relaxed = False
+            state.relax_plan = []
         state.value = clamped
         state.pulse_us = None
         state.stamp = self.get_clock().now() if stamp else None
@@ -616,12 +624,46 @@ class Pca9685Node(Node):
                 self._command(name, config.home, 'timeout', stamp=False)
         for name in self._configs:
             self._tick_esc(name)
+        self._tick_relax(now)
         if self._config_dirty:
             self._config_dirty = False
             self._reload_configuration()
         if (now - self._last_health_check).nanoseconds >= HEALTH_CHECK_PERIOD * 1e9:
             self._last_health_check = now
             self._check_board()
+
+    def _moving(self) -> bool:
+        """True while any continuous channel (a motor) is commanded off neutral."""
+        return any(self._configs[n].kind == channels.CONTINUOUS and s.value not in (None, 0.0)
+                   for n, s in self._states.items())
+
+    def _tick_relax(self, now) -> None:
+        """The settle wiggle: once per new value, ``relax_after_s`` after it stopped
+        changing and only while the motors are idle, write value-d, value+d, value
+        a quarter second apart. A loaded steering servo stops chattering."""
+        for name, config in self._configs.items():
+            state = self._states[name]
+            if config.kind != channels.SERVO or config.relax_deg <= 0.0 or state.value is None:
+                continue
+            if state.relax_plan:
+                due, angle = state.relax_plan[0]
+                if now >= due:
+                    state.relax_plan.pop(0)
+                    try:
+                        self._write_output(config, config.clamp(angle))
+                    except OSError as exc:
+                        self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
+                        state.relax_plan = []
+                continue
+            if state.relaxed or state.changed_at is None or self._moving():
+                continue
+            if (now - state.changed_at).nanoseconds < config.relax_after_s * 1e9:
+                continue
+            d = config.relax_deg
+            state.relax_plan = [(now, state.value - d), (now + Duration(seconds=0.25), state.value + d),
+                                (now + Duration(seconds=0.5), state.value)]
+            state.relaxed = True
+            self.get_logger().debug(f'{name}: settle wiggle +-{d:g} deg around {state.value:g}')
 
     # ------------------------------------------------------------------ shutdown --
 

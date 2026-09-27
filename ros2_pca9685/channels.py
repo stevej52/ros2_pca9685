@@ -61,6 +61,8 @@ CHANNEL_PARAMS: dict[str, object] = {
     'home': None,
     'home_on_start': False,
     'timeout': 0.0,
+    'relax_deg': 0.0,
+    'relax_after_s': 0.7,
     'on_shutdown': SHUTDOWN_OFF,
     'joint': '',
     **{f'twist.{axis}': 0.0 for axis in TWIST_AXES},
@@ -97,6 +99,8 @@ class ChannelConfig:
     home: float
     home_on_start: bool
     timeout: float
+    relax_deg: float           # servo: after settling, one wiggle of +-this, then back (0 = never)
+    relax_after_s: float       # ... this long after the value last changed
     on_shutdown: str
     joint: str
     twist_gains: tuple[tuple[str, float], ...]
@@ -172,6 +176,8 @@ class ChannelConfig:
             'home': self.home,
             'home_on_start': self.home_on_start,
             'timeout': self.timeout,
+            'relax_deg': self.relax_deg,
+            'relax_after_s': self.relax_after_s,
             'on_shutdown': self.on_shutdown,
             'joint': self.joint,
         }
@@ -202,6 +208,8 @@ class ChannelConfig:
         parts.append(f'home {self.home:g}' + (' (on start)' if self.home_on_start else ''))
         if self.timeout > 0.0:
             parts.append(f'timeout {self.timeout:g} s')
+        if self.relax_deg > 0.0:
+            parts.append(f'relax +-{self.relax_deg:g} deg {self.relax_after_s:g} s after settling')
         if self.twist_gains:
             gains = ' '.join(f'{axis}*{gain:g}' for axis, gain in self.twist_gains)
             parts.append(f'twist {gains}')
@@ -347,6 +355,17 @@ def parse_channel(name: str, values: Mapping[str, object]) -> ChannelConfig:
     if timeout < 0.0:
         raise ConfigError(f"'{name}.timeout' must not be negative")
 
+    # A servo holding a loaded position (steering wheels wound up against the
+    # carpet) can chatter for ever; one small wiggle after it settles lets the
+    # load relax. Measured 2026-09-27: a 1-2 deg wiggle took the buzz from
+    # +5.7 to -3.5 dB and it stayed quiet.
+    relax_deg = number('relax_deg')
+    relax_after_s = number('relax_after_s')
+    if relax_deg < 0.0 or relax_after_s < 0.0:
+        raise ConfigError(f"'{name}.relax_deg' and '{name}.relax_after_s' must not be negative")
+    if relax_deg > 0.0 and kind != SERVO:
+        raise ConfigError(f"'{name}.relax_deg' is for servo channels only")
+
     # YAML reads a bare ``off`` as the boolean false; accept it as the mode 'off'.
     on_shutdown = SHUTDOWN_OFF if raw('on_shutdown') is False else text('on_shutdown')
     if on_shutdown not in SHUTDOWN_MODES:
@@ -420,6 +439,8 @@ def parse_channel(name: str, values: Mapping[str, object]) -> ChannelConfig:
         home=home,
         home_on_start=boolean('home_on_start'),
         timeout=timeout,
+        relax_deg=relax_deg,
+        relax_after_s=relax_after_s,
         on_shutdown=on_shutdown,
         joint=joint,
         twist_gains=tuple(twist_gains),
