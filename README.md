@@ -157,6 +157,8 @@ with that library carry over.
 | `home`              | middle of limits (servo), `0.0` (others) | Value written at start-up (if `home_on_start`), when a timeout expires and, optionally, at shutdown. |
 | `home_on_start`     | `false`          | Move to `home` as soon as the node starts. Otherwise the output stays off (servo limp) until the first command. |
 | `timeout`           | `0.0`            | Seconds without a command before the channel returns to `home`. `0` disables the timeout.      |
+| `relax_deg`         | `0.0`            | Servo only: once a new value has settled (and no continuous channel is driving), one wiggle of ± this many degrees and back. A servo holding a loaded position (steering wheels wound up on carpet) can buzz for ever; a small wiggle lets the load off. `0` disables it. |
+| `relax_after_s`     | `0.7`            | Servo only: how long after the value last changed the `relax_deg` wiggle happens.               |
 | `on_shutdown`       | `off`            | What happens when the node exits: `off` (no more pulses), `home`, or `hold` (keep the last value). Write `"off"` with quotes: YAML reads a bare `off` as false (the node treats that as `off` too). |
 | `joint`             | channel name     | Name used in `JointState` messages.                                                            |
 | `twist.linear_x` … `twist.angular_z` | `0.0` | Gains for following the Twist topic (see below).                                     |
