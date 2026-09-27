@@ -119,7 +119,10 @@ class Pca9685Node(Node):
         self.pca: pca9685.Pca9685 | None = None
         self._config_dirty = False
         self._command_subscriptions = []
-        self._services = []
+        # NOT _services: rclpy's Node keeps its parameter services in self._services,
+        # and overwriting it made them vanish (found 2026-09-26: ros2 param could not
+        # reach the node, and throttle_calibration stopped on it)
+        self._arm_services = []
 
         self._names = self._declare_parameters()
         self._settings = self._read_settings()
@@ -142,7 +145,7 @@ class Pca9685Node(Node):
             self._command_subscriptions.append(self.create_subscription(
                 Float64, f'~/{name}/pulse_width', self._pulse_callback(name), qos))
             if config.kind == channels.CONTINUOUS:
-                self._services.append(self.create_service(
+                self._arm_services.append(self.create_service(
                     Trigger, f'~/{name}/arm', self._arm_callback(name)))
         if any(config.twist_driven for config in self._configs.values()):
             self._command_subscriptions.append(self.create_subscription(
