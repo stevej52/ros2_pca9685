@@ -624,7 +624,8 @@ class Pca9685Node(Node):
             if config.timeout <= 0.0 or state.stamp is None:
                 continue
             if (now - state.stamp).nanoseconds >= config.timeout * 1e9:
-                self.get_logger().warning(
+                # routine - every time a driver lets go - so info, not a warning
+                self.get_logger().info(
                     f'{name}: no command for {config.timeout:g} s, returning to home '
                     f'({config.home:g} {config.units})')
                 self._command(name, config.home, 'timeout', stamp=False)
