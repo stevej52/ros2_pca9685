@@ -61,12 +61,20 @@ GLOBAL_PARAMS: dict[str, object] = {
     'twist_topic': 'cmd_vel',
     'joint_state_topic': '',
     'joint_state_publish_rate': 0.0,
+    # A GPIO (header BOARD number, Jetson.GPIO) wired - through a relay or a transistor - so
+    # that the board's OE pin is pulled high, every output dead, unless this node holds the
+    # GPIO at its active level. 0 = none. The chip itself keeps sending its last pulses when
+    # the computer crashes; the GPIO does not survive a reset, so a crash (the kernel reboots
+    # in 5 s) or a power cut takes the throttle signal away.
+    'output_enable_pin': 0,
+    'output_enable_active_high': True,
 }
 
 # Parameters that only take effect when the node starts.
 RESTART_ONLY = (
     'i2c_bus', 'i2c_address', 'simulate', 'channels',
-    'twist_topic', 'joint_state_topic', 'joint_state_publish_rate')
+    'twist_topic', 'joint_state_topic', 'joint_state_publish_rate',
+    'output_enable_pin', 'output_enable_active_high')
 RESTART_ONLY_CHANNEL = ('channel', 'type', 'joint')
 
 MIN_I2C_ADDRESS = 0x40
@@ -177,9 +185,34 @@ class Pca9685Node(Node):
             elif config.home_on_start:
                 self._command(name, config.home, 'home_on_start', stamp=False)
         self.add_on_set_parameters_callback(self._on_set_parameters)
+        # every channel is at its start value now: let the outputs through
+        self._output_gpio = None
+        self._set_outputs_enabled(True)
         self.get_logger().info(
             f'{len(self._configs)} channel(s) ready; command topics are under '
             f'{self.get_fully_qualified_name()}/<channel>/')
+
+    def _set_outputs_enabled(self, enabled: bool) -> None:
+        """Drive the output-enable GPIO, if there is one (see GLOBAL_PARAMS)."""
+        pin = self._settings.get('output_enable_pin', 0)
+        if not pin or self._settings['simulate']:
+            return
+        high = self._settings['output_enable_active_high'] == enabled
+        try:
+            if self._output_gpio is None:
+                import Jetson.GPIO as GPIO
+                GPIO.setwarnings(False)
+                GPIO.setmode(GPIO.BOARD)
+                GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH if high else GPIO.LOW)
+                self._output_gpio = GPIO
+            else:
+                self._output_gpio.output(pin, self._output_gpio.HIGH if high else self._output_gpio.LOW)
+        except Exception as exc:  # noqa: B902 - no GPIO means the outputs stay off, and say so
+            self._log_late('error', f'output-enable pin {pin}: {type(exc).__name__}: {exc} - '
+                                    f'the outputs stay {"OFF" if enabled else "as they are"}')
+            return
+        self._log_late('info', f'outputs {"ENABLED" if enabled else "DISABLED"} '
+                               f'(output-enable pin {pin} {"high" if high else "low"})')
 
     # ----------------------------------------------------------------- parameters --
 
@@ -272,7 +305,13 @@ class Pca9685Node(Node):
             'twist_topic': text('twist_topic'),
             'joint_state_topic': text('joint_state_topic'),
             'joint_state_publish_rate': number('joint_state_publish_rate'),
+            'output_enable_pin': integer('output_enable_pin', 0, 40),
         }
+        if not isinstance(values['output_enable_active_high'], bool):
+            raise channels.ConfigError(
+                "'output_enable_active_high' must be true or false, "
+                f"got {values['output_enable_active_high']!r}")
+        settings['output_enable_active_high'] = values['output_enable_active_high']
         if not isinstance(values['simulate'], bool):
             raise channels.ConfigError(
                 f"'simulate' must be true or false, got {values['simulate']!r}")
@@ -714,6 +753,9 @@ class Pca9685Node(Node):
 
     def shutdown_outputs(self) -> None:
         """Apply each channel's ``on_shutdown`` setting and release the bus."""
+        # the output-enable first: every output dead at once, whatever the chip still holds
+        if getattr(self, '_output_gpio', None) is not None:
+            self._set_outputs_enabled(False)
         if self.pca is None:
             return
         for name, config in self._configs.items():
