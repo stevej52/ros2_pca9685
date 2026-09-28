@@ -743,7 +743,19 @@ def main(args=None) -> int:
     exit_code = 0
     try:
         node = Pca9685Node()
-        rclpy.spin(node)
+        # rclpy's EventsExecutor where there is one: the default executor rebuilds its
+        # wait set in Python on every wake-up, and driving there are ~80 a second (the
+        # 50 Hz watchdog, the commands, joint_states) - 10 % of a Jetson core on the
+        # 2026-09-28 drive. Its timers cancel and reset as the watchdog needs (checked
+        # that day: cancel, reset, cancel from its own callback, reset from a message).
+        try:
+            from rclpy.experimental import EventsExecutor
+            executor = EventsExecutor()
+        except ImportError:
+            from rclpy.executors import SingleThreadedExecutor
+            executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     except (channels.ConfigError, pca9685.I2CError) as exc:
