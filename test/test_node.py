@@ -193,6 +193,23 @@ def test_twist_drives_channels_and_timeout_returns_home(harness):
     assert harness.state(0) == harness.ticks_for_pulse(1750.0)
 
 
+def test_watchdog_sleeps_when_idle_and_wakes_for_commands(harness):
+    node = harness.node
+    # nothing to time after start-up (no timeout pending, no ESC sequence): it stops
+    assert harness.wait_for(lambda: node._watchdog_timer.is_canceled(), timeout=3.0)
+    twist = Twist()
+    twist.angular.z = 1.0
+    harness.publish('/cmd_vel', Twist, twist,
+                    lambda: harness.state(1) == harness.ticks_for_angle(85.0 - 18.33))
+    assert not node._watchdog_timer.is_canceled()
+    # the steering timeout is still enforced after a sleep, then it sleeps again
+    assert harness.wait_for(lambda: harness.state(1) == harness.ticks_for_angle(85.0), timeout=2.0)
+    assert harness.wait_for(lambda: node._watchdog_timer.is_canceled(), timeout=3.0)
+    # a parameter change wakes it to apply the new configuration
+    assert node.set_parameters([Parameter('steering.max_limit', value=100.0)])[0].successful
+    assert harness.wait_for(lambda: node._configs['steering'].max_limit == 100.0)
+
+
 def test_parameter_updates_are_validated_and_applied(harness):
     node = harness.node
     harness.publish(harness.topic('steering', 'angle'), Float64, Float64(data=120.0),

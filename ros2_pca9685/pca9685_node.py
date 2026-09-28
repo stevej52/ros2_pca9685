@@ -33,9 +33,9 @@ from typing import Mapping
 from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 import rclpy
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.logging import get_logger
-from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -140,7 +140,7 @@ class Pca9685Node(Node):
             if config.kind == channels.SERVO}
 
         self.bus, self.pca = self._open_board()
-        self._last_health_check = self.get_clock().now()
+        self._watchdog_timer = None
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         for name, config in self._configs.items():
@@ -162,7 +162,12 @@ class Pca9685Node(Node):
         if rate > 0.0:
             self._joint_state_publisher = self.create_publisher(JointState, 'joint_states', 10)
             self.create_timer(1.0 / rate, self._publish_joint_states)
-        self.create_timer(WATCHDOG_PERIOD, self._watchdog)
+        # The watchdog ticks every WATCHDOG_PERIOD only while it has something to time
+        # (a command timeout, an ESC sequence, a settle wiggle, new parameters) and
+        # stops itself otherwise; every command and every write to the chip starts it
+        # again. Parked, its 50 idle wake-ups a second cost ~7 % of a Jetson core.
+        self._watchdog_timer = self.create_timer(WATCHDOG_PERIOD, self._watchdog)
+        self.create_timer(HEALTH_CHECK_PERIOD, self._check_board)
 
         for name, config in self._configs.items():
             self.get_logger().info(f'{name}: {config.describe()}')
@@ -327,6 +332,7 @@ class Pca9685Node(Node):
             return SetParametersResult(successful=False, reason=str(exc))
         # The new values are applied by the watchdog once rclpy has stored them.
         self._config_dirty = True
+        self._wake_watchdog()
         return SetParametersResult(successful=True)
 
     def _reload_configuration(self) -> None:
@@ -445,6 +451,7 @@ class Pca9685Node(Node):
 
     def _apply(self, name: str, source: str) -> None:
         """Write the stored state of a channel to the chip."""
+        self._wake_watchdog()
         config = self._configs[name]
         state = self._states[name]
         try:
@@ -525,6 +532,7 @@ class Pca9685Node(Node):
 
     def _command(self, name: str, value: float, source: str, stamp: bool = True) -> None:
         """Store and write a command given in the channel's units."""
+        self._wake_watchdog()
         config = self._configs[name]
         state = self._states[name]
         if not math.isfinite(value):
@@ -551,6 +559,7 @@ class Pca9685Node(Node):
 
     def _command_pulse(self, name: str, pulse_us: float, source: str) -> None:
         """Store and write a raw pulse width; zero or less switches the output off."""
+        self._wake_watchdog()
         state = self._states[name]
         if not math.isfinite(pulse_us):
             self.get_logger().warning(
@@ -635,19 +644,46 @@ class Pca9685Node(Node):
         if self._config_dirty:
             self._config_dirty = False
             self._reload_configuration()
-        if (now - self._last_health_check).nanoseconds >= HEALTH_CHECK_PERIOD * 1e9:
-            self._last_health_check = now
-            self._check_board()
+        if not self._watchdog_needed():
+            self._watchdog_timer.cancel()
+
+    def _watchdog_needed(self) -> bool:
+        """Whether the watchdog has anything left to time."""
+        if self._config_dirty:
+            return True
+        for name, config in self._configs.items():
+            state = self._states[name]
+            if config.timeout > 0.0 and state.stamp is not None:
+                return True  # a timeout to enforce
+            if state.sequencer is not None and state.sequencer.busy:
+                return True  # an ESC sequence to step through
+            if state.relax_plan:
+                return True  # a settle wiggle under way
+            if (config.kind == channels.SERVO and config.relax_deg > 0.0
+                    and state.value is not None and not state.relaxed
+                    and state.changed_at is not None):
+                return True  # a settle wiggle still to come
+        return False
+
+    def _wake_watchdog(self) -> None:
+        """Restart the watchdog's ticks (from now) if it had stopped itself."""
+        timer = self._watchdog_timer
+        if timer is not None and timer.is_canceled():
+            timer.reset()
 
     def _moving(self) -> bool:
-        """True while any continuous channel (a motor) is commanded off neutral."""
+        """Return whether any continuous channel (a motor) is commanded off neutral."""
         return any(self._configs[n].kind == channels.CONTINUOUS and s.value not in (None, 0.0)
                    for n, s in self._states.items())
 
     def _tick_relax(self, now) -> None:
-        """The settle wiggle: once per new value, ``relax_after_s`` after it stopped
-        changing and only while the motors are idle, write value-d, value+d, value
-        a quarter second apart. A loaded steering servo stops chattering."""
+        """
+        Run the settle wiggle.
+
+        Once per new value, ``relax_after_s`` after it stopped changing and only while
+        the motors are idle, write value-d, value+d, value a quarter second apart. A
+        loaded steering servo stops chattering.
+        """
         for name, config in self._configs.items():
             state = self._states[name]
             if config.kind != channels.SERVO or config.relax_deg <= 0.0 or state.value is None:
@@ -659,7 +695,8 @@ class Pca9685Node(Node):
                     try:
                         self._write_output(config, config.clamp(angle))
                     except OSError as exc:
-                        self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
+                        self.get_logger().error(
+                            f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
                         state.relax_plan = []
                 continue
             if state.relaxed or state.changed_at is None or self._moving():
@@ -667,7 +704,8 @@ class Pca9685Node(Node):
             if (now - state.changed_at).nanoseconds < config.relax_after_s * 1e9:
                 continue
             d = config.relax_deg
-            state.relax_plan = [(now, state.value - d), (now + Duration(seconds=0.25), state.value + d),
+            state.relax_plan = [(now, state.value - d),
+                                (now + Duration(seconds=0.25), state.value + d),
                                 (now + Duration(seconds=0.5), state.value)]
             state.relaxed = True
             self.get_logger().debug(f'{name}: settle wiggle +-{d:g} deg around {state.value:g}')
