@@ -206,7 +206,8 @@ class Pca9685Node(Node):
                 GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH if high else GPIO.LOW)
                 self._output_gpio = GPIO
             else:
-                self._output_gpio.output(pin, self._output_gpio.HIGH if high else self._output_gpio.LOW)
+                gpio = self._output_gpio
+                gpio.output(pin, gpio.HIGH if high else gpio.LOW)
         except Exception as exc:  # noqa: B902 - no GPIO means the outputs stay off, and say so
             self._log_late('error', f'output-enable pin {pin}: {type(exc).__name__}: {exc} - '
                                     f'the outputs stay {"OFF" if enabled else "as they are"}')
