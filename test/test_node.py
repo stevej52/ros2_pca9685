@@ -446,3 +446,47 @@ def test_raw_pulse_cancels_esc_sequences(esc_harness):
     assert harness.node._states['drive'].sequencer.busy is False
     harness.spin(0.7)
     assert harness.state(0) == harness.ticks_for_pulse(1700.0)
+
+
+class FakeGPIO:
+    """Stands in for Jetson.GPIO: records every level written to the output-enable pin."""
+
+    HIGH, LOW = 1, 0
+
+    def __init__(self):
+        self.writes = []
+
+    def output(self, pin, level):
+        self.writes.append((pin, level))
+
+
+def _enable_fake_oe(harness, heartbeat_hz):
+    node = harness.node
+    node._settings['simulate'] = False          # the pin logic is skipped in simulation
+    node._settings['output_enable_pin'] = 7
+    node._settings['output_enable_active_high'] = True
+    node._settings['output_enable_heartbeat_hz'] = heartbeat_hz
+    gpio = node._output_gpio = FakeGPIO()
+    node._set_outputs_enabled(True)
+    return gpio
+
+
+def test_output_enable_heartbeat_toggles_and_stops_when_disabled(harness):
+    gpio = _enable_fake_oe(harness, 50.0)       # 100 edges a second
+    harness.spin(0.5)
+    levels = [level for _, level in gpio.writes]
+    assert len(levels) > 20, 'the heartbeat should toggle the pin'
+    assert all(a != b for a, b in zip(levels, levels[1:])), 'every write is an edge'
+    harness.node._set_outputs_enabled(False)
+    n = len(gpio.writes)
+    harness.spin(0.3)
+    assert gpio.writes[n - 1] == (7, FakeGPIO.LOW), 'disabled holds the pin at its inactive level'
+    assert len(gpio.writes) == n, 'no more edges once disabled: the watchdog drops the relay'
+    harness.node._settings['simulate'] = True    # so close() does not touch the fake again
+
+
+def test_output_enable_without_heartbeat_is_a_steady_level(harness):
+    gpio = _enable_fake_oe(harness, 0.0)
+    harness.spin(0.3)
+    assert gpio.writes == [(7, FakeGPIO.HIGH)], 'no heartbeat: one steady high, nothing more'
+    harness.node._settings['simulate'] = True

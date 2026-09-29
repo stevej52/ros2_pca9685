@@ -68,13 +68,20 @@ GLOBAL_PARAMS: dict[str, object] = {
     # in 5 s) or a power cut takes the throttle signal away.
     'output_enable_pin': 0,
     'output_enable_active_high': True,
+    # Heartbeat instead of a steady level (Hz; 0 = steady). A frozen computer keeps a GPIO where
+    # it was, so a steady "enabled" survives a kernel hang while the chip keeps its last pulses;
+    # toggled from this node's own timer, the pin stops changing the moment the node, its
+    # executor or the kernel stops, and an external watchdog (a missing-pulse detector between
+    # the pin and the relay) drops the outputs. Only with that watchdog fitted: wired straight
+    # to a relay, a heartbeat just makes it chatter.
+    'output_enable_heartbeat_hz': 0.0,
 }
 
 # Parameters that only take effect when the node starts.
 RESTART_ONLY = (
     'i2c_bus', 'i2c_address', 'simulate', 'channels',
     'twist_topic', 'joint_state_topic', 'joint_state_publish_rate',
-    'output_enable_pin', 'output_enable_active_high')
+    'output_enable_pin', 'output_enable_active_high', 'output_enable_heartbeat_hz')
 RESTART_ONLY_CHANNEL = ('channel', 'type', 'joint')
 
 MIN_I2C_ADDRESS = 0x40
@@ -187,6 +194,9 @@ class Pca9685Node(Node):
         self.add_on_set_parameters_callback(self._on_set_parameters)
         # every channel is at its start value now: let the outputs through
         self._output_gpio = None
+        self._oe_enabled = False
+        self._oe_high = None             # the level last written to the output-enable pin
+        self._heartbeat_timer = None
         self._set_outputs_enabled(True)
         # ~/output_enable (Bool): drop or restore every output at the hardware while running -
         # a STOP that does not depend on this node's own commands, and how the OE path is tested
@@ -203,22 +213,41 @@ class Pca9685Node(Node):
         if not pin or self._settings['simulate']:
             return
         high = self._settings['output_enable_active_high'] == enabled
+        self._oe_enabled = enabled
         try:
-            if self._output_gpio is None:
-                import Jetson.GPIO as GPIO
-                GPIO.setwarnings(False)
-                GPIO.setmode(GPIO.BOARD)
-                GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH if high else GPIO.LOW)
-                self._output_gpio = GPIO
-            else:
-                gpio = self._output_gpio
-                gpio.output(pin, gpio.HIGH if high else gpio.LOW)
+            self._write_oe(pin, high)
         except Exception as exc:  # noqa: B902 - no GPIO means the outputs stay off, and say so
             self._log_late('error', f'output-enable pin {pin}: {type(exc).__name__}: {exc} - '
                                     f'the outputs stay {"OFF" if enabled else "as they are"}')
             return
+        hz = float(self._settings.get('output_enable_heartbeat_hz', 0.0) or 0.0)
+        if enabled and hz > 0.0 and self._heartbeat_timer is None:
+            self._heartbeat_timer = self.create_timer(0.5 / hz, self._heartbeat)
         self._log_late('info', f'outputs {"ENABLED" if enabled else "DISABLED"} '
-                               f'(output-enable pin {pin} {"high" if high else "low"})')
+                               f'(output-enable pin {pin} {"high" if high else "low"}'
+                               + (f', heartbeat {hz:g} Hz' if enabled and hz > 0.0 else '') + ')')
+
+    def _write_oe(self, pin: int, high: bool) -> None:
+        if self._output_gpio is None:
+            import Jetson.GPIO as GPIO
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BOARD)
+            GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH if high else GPIO.LOW)
+            self._output_gpio = GPIO
+        else:
+            gpio = self._output_gpio
+            gpio.output(pin, gpio.HIGH if high else gpio.LOW)
+        self._oe_high = high
+
+    def _heartbeat(self) -> None:
+        """Toggle the output-enable pin while the outputs are enabled (output_enable_heartbeat_hz).
+        Disabled: the pin stays at its inactive level, no edges, and the watchdog drops the relay."""
+        if not self._oe_enabled or self._output_gpio is None:
+            return
+        try:
+            self._write_oe(self._settings['output_enable_pin'], not self._oe_high)
+        except Exception as exc:  # noqa: B902 - a failed toggle stops the heartbeat: outputs drop
+            self._log_late('error', f'output-enable heartbeat: {type(exc).__name__}: {exc}')
 
     # ----------------------------------------------------------------- parameters --
 
