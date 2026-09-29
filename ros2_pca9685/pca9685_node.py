@@ -43,7 +43,7 @@ from rclpy.time import Time
 from ros2_pca9685 import channels, pca9685
 from ros2_pca9685.esc import EscSequencer, sequence_duration
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Bool, Float64
 from std_srvs.srv import Trigger
 
 WATCHDOG_PERIOD = 0.02  # seconds between timeout checks and ESC sequence steps
@@ -188,6 +188,11 @@ class Pca9685Node(Node):
         # every channel is at its start value now: let the outputs through
         self._output_gpio = None
         self._set_outputs_enabled(True)
+        # ~/output_enable (Bool): drop or restore every output at the hardware while running -
+        # a STOP that does not depend on this node's own commands, and how the OE path is tested
+        if self._settings.get('output_enable_pin', 0) and not self._settings['simulate']:
+            self._command_subscriptions.append(self.create_subscription(
+                Bool, '~/output_enable', lambda m: self._set_outputs_enabled(bool(m.data)), 10))
         self.get_logger().info(
             f'{len(self._configs)} channel(s) ready; command topics are under '
             f'{self.get_fully_qualified_name()}/<channel>/')
