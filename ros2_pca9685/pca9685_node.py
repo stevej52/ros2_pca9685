@@ -240,8 +240,12 @@ class Pca9685Node(Node):
         self._oe_high = high
 
     def _heartbeat(self) -> None:
-        """Toggle the output-enable pin while the outputs are enabled (output_enable_heartbeat_hz).
-        Disabled: the pin stays at its inactive level, no edges, and the watchdog drops the relay."""
+        """
+        Toggle the output-enable pin while the outputs are enabled.
+
+        See output_enable_heartbeat_hz. Disabled: the pin stays at its inactive level, no
+        edges, and the watchdog drops the relay.
+        """
         if not self._oe_enabled or self._output_gpio is None:
             return
         try:
