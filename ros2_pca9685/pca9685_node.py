@@ -196,6 +196,7 @@ class Pca9685Node(Node):
         self._output_gpio = None
         self._oe_enabled = False
         self._oe_high = None             # the level last written to the output-enable pin
+        self._io_failed = False          # a failed I2C write: outputs off until re-applied
         self._heartbeat_timer = None
         self._set_outputs_enabled(True)
         # ~/output_enable (Bool): drop or restore every output at the hardware while running -
@@ -546,6 +547,14 @@ class Pca9685Node(Node):
                 detail = self._write_output(config, state.value)
         except OSError as exc:
             self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
+            # The chip may still be putting out the LAST pulse (a throttle, say) while this
+            # node believes it wrote neutral (the audit of 2026-10-02). Until a full re-apply
+            # succeeds the outputs are disabled through the output-enable pin, if there is one.
+            if not self._io_failed:
+                self._io_failed = True
+                self.get_logger().error(
+                    'I2C write failed: outputs DISABLED until a re-apply succeeds')
+                self._set_outputs_enabled(False)
             return
         log = self.get_logger().info if self._settings['simulate'] else self.get_logger().debug
         log(f'{name}: {detail} ({source})')
@@ -593,6 +602,13 @@ class Pca9685Node(Node):
     def _check_board(self) -> None:
         try:
             if self.pca.is_configured():
+                if self._io_failed:
+                    # the bus answers again: everything written afresh, then the outputs back
+                    self._io_failed = False
+                    self._reapply_all('recovery after a failed write')
+                    if not self._io_failed:
+                        self._set_outputs_enabled(True)
+                        self.get_logger().warning('I2C writes succeed again: outputs ENABLED')
                 return
         except OSError as exc:
             self.get_logger().error(f'I2C read failed: {exc}', throttle_duration_sec=5.0)
@@ -604,7 +620,11 @@ class Pca9685Node(Node):
         except OSError as exc:
             self.get_logger().error(f'Re-initialisation failed: {exc}', throttle_duration_sec=5.0)
             return
+        failed_before = self._io_failed
+        self._io_failed = False
         self._reapply_all('recovery')
+        if failed_before and not self._io_failed:
+            self._set_outputs_enabled(True)     # the re-init re-applied everything: outputs back
 
     # ------------------------------------------------------------------ commands --
 
