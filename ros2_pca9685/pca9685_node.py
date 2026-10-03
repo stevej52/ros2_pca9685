@@ -346,7 +346,12 @@ class Pca9685Node(Node):
             'joint_state_topic': text('joint_state_topic'),
             'joint_state_publish_rate': number('joint_state_publish_rate'),
             'output_enable_pin': integer('output_enable_pin', 0, 40),
+            # declared since b1364fa but never copied in here, so the timer never started
+            # (found 2026-10-02 the evening the XIAO was fitted: pin 7 stayed high)
+            'output_enable_heartbeat_hz': number('output_enable_heartbeat_hz'),
         }
+        if settings['output_enable_heartbeat_hz'] < 0.0:
+            raise channels.ConfigError("'output_enable_heartbeat_hz' must not be negative")
         if not isinstance(values['output_enable_active_high'], bool):
             raise channels.ConfigError(
                 "'output_enable_active_high' must be true or false, "

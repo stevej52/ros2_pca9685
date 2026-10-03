@@ -485,6 +485,16 @@ def test_output_enable_heartbeat_toggles_and_stops_when_disabled(harness):
     harness.node._settings['simulate'] = True    # so close() does not touch the fake again
 
 
+def test_heartbeat_setting_is_read_from_the_parameter(harness):
+    # The tests above set _settings by hand, which is how a parameter that was declared but
+    # never copied into the settings went unnoticed until the XIAO was fitted (2026-10-02).
+    node = harness.node
+    assert node._read_settings({'output_enable_heartbeat_hz': 20.0})['output_enable_heartbeat_hz'] == 20.0
+    assert node._read_settings({'output_enable_heartbeat_hz': 0})['output_enable_heartbeat_hz'] == 0.0
+    with pytest.raises(ConfigError):
+        node._read_settings({'output_enable_heartbeat_hz': -5.0})
+
+
 def test_output_enable_without_heartbeat_is_a_steady_level(harness):
     gpio = _enable_fake_oe(harness, 0.0)
     harness.spin(0.3)
