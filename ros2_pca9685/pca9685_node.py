@@ -185,6 +185,15 @@ class Pca9685Node(Node):
         self._watchdog_timer = self.create_timer(WATCHDOG_PERIOD, self._watchdog)
         self.create_timer(HEALTH_CHECK_PERIOD, self._check_board)
 
+        # the fault and output-enable state exists BEFORE the first write to the chip: a write
+        # that failed at start-up used to die inside its own error handler (AttributeError on
+        # _io_failed; the review of 2026-10-03)
+        self._output_gpio = None
+        self._oe_enabled = False
+        self._oe_high = None             # the level last written to the output-enable pin
+        self._io_failed = False          # a failed I2C write: outputs off until re-applied
+        self._operator_disabled = False  # ~/output_enable false: stays off through any recovery
+        self._heartbeat_timer = None
         for name, config in self._configs.items():
             self.get_logger().info(f'{name}: {config.describe()}')
             if config.esc.arming:
@@ -194,20 +203,41 @@ class Pca9685Node(Node):
                 self._command(name, config.home, 'home_on_start', stamp=False)
         self.add_on_set_parameters_callback(self._on_set_parameters)
         # every channel is at its start value now: let the outputs through
-        self._output_gpio = None
-        self._oe_enabled = False
-        self._oe_high = None             # the level last written to the output-enable pin
-        self._io_failed = False          # a failed I2C write: outputs off until re-applied
-        self._heartbeat_timer = None
-        self._set_outputs_enabled(True)
+        self._set_outputs_enabled(not self._io_failed)
         # ~/output_enable (Bool): drop or restore every output at the hardware while running -
         # a STOP that does not depend on this node's own commands, and how the OE path is tested
         if self._settings.get('output_enable_pin', 0) and not self._settings['simulate']:
             self._command_subscriptions.append(self.create_subscription(
-                Bool, '~/output_enable', lambda m: self._set_outputs_enabled(bool(m.data)), 10))
+                Bool, '~/output_enable', lambda m: self._operator_enable(bool(m.data)), 10))
         self.get_logger().info(
             f'{len(self._configs)} channel(s) ready; command topics are under '
             f'{self.get_fully_qualified_name()}/<channel>/')
+
+    def _operator_enable(self, enabled: bool) -> None:
+        """~/output_enable: an operator's OFF outlives any automatic hardware recovery."""
+        self._operator_disabled = not enabled
+        self._set_outputs_enabled(enabled)
+
+    def _write_failed(self, name: str, exc: BaseException) -> None:
+        """One handler for every failed write to the chip: say it, drop the outputs, stay off
+        until a full re-apply succeeds (the review of 2026-10-03: the ESC timer only logged)."""
+        self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
+        # The chip may still be putting out the LAST pulse (a throttle, say) while this
+        # node believes it wrote neutral (the audit of 2026-10-02). Until a full re-apply
+        # succeeds the outputs are disabled through the output-enable pin, if there is one.
+        if not self._io_failed:
+            self._io_failed = True
+            self.get_logger().error('I2C write failed: outputs DISABLED until a re-apply succeeds')
+            self._set_outputs_enabled(False)
+
+    def _motors_neutral(self, source: str) -> None:
+        """Every continuous channel back to its neutral before a re-apply: a throttle that was
+        in flight when the bus failed must not come back with the bus (review 2026-10-03)."""
+        for name, config in self._configs.items():
+            if config.kind == channels.CONTINUOUS and self._states[name].value not in (None, config.home):
+                self.get_logger().warning(f'{name}: {source}: back to neutral, not the last command')
+                self._states[name].value = config.home
+                self._states[name].pulse_us = None
 
     def _set_outputs_enabled(self, enabled: bool, reapply: bool = True) -> None:
         """Drive the output-enable GPIO, if there is one (see GLOBAL_PARAMS).
@@ -569,15 +599,7 @@ class Pca9685Node(Node):
             else:
                 detail = self._write_output(config, state.value)
         except OSError as exc:
-            self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
-            # The chip may still be putting out the LAST pulse (a throttle, say) while this
-            # node believes it wrote neutral (the audit of 2026-10-02). Until a full re-apply
-            # succeeds the outputs are disabled through the output-enable pin, if there is one.
-            if not self._io_failed:
-                self._io_failed = True
-                self.get_logger().error(
-                    'I2C write failed: outputs DISABLED until a re-apply succeeds')
-                self._set_outputs_enabled(False)
+            self._write_failed(name, exc)
             return
         log = self.get_logger().info if self._settings['simulate'] else self.get_logger().debug
         log(f'{name}: {detail} ({source})')
@@ -595,7 +617,7 @@ class Pca9685Node(Node):
         try:
             self.pca.set_pulse_width_us(config.channel, pulse_us)
         except OSError as exc:
-            self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
+            self._write_failed(name, exc)
             return
         state.written = output
         source = state.sequencer.sequence or 'sequence finished'
@@ -626,12 +648,16 @@ class Pca9685Node(Node):
         try:
             if self.pca.is_configured():
                 if self._io_failed:
-                    # the bus answers again: everything written afresh, then the outputs back
+                    # the bus answers again: motors neutral, everything written afresh, then
+                    # the outputs back - unless an operator switched them off
                     self._io_failed = False
+                    self._motors_neutral('recovery after a failed write')
                     self._reapply_all('recovery after a failed write')
-                    if not self._io_failed:
+                    if not self._io_failed and not self._operator_disabled:
                         self._set_outputs_enabled(True, reapply=False)   # just re-applied above
                         self.get_logger().warning('I2C writes succeed again: outputs ENABLED')
+                    elif not self._io_failed:
+                        self.get_logger().warning('I2C writes succeed again: outputs stay OFF (operator)')
                 return
         except OSError as exc:
             self.get_logger().error(f'I2C read failed: {exc}', throttle_duration_sec=5.0)
@@ -645,8 +671,9 @@ class Pca9685Node(Node):
             return
         failed_before = self._io_failed
         self._io_failed = False
+        self._motors_neutral('recovery after a re-initialisation')
         self._reapply_all('recovery')
-        if failed_before and not self._io_failed:
+        if failed_before and not self._io_failed and not self._operator_disabled:
             self._set_outputs_enabled(True, reapply=False)   # the re-init re-applied everything: outputs back
 
     # ------------------------------------------------------------------ commands --

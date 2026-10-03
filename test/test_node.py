@@ -283,7 +283,9 @@ def test_shutdown_modes(ros_context):
 
 
 def test_recovers_when_the_chip_resets(harness):
-    # The ESC channel has no timeout, so its command must survive the recovery.
+    # The ESC channel has no timeout; until 2026-10-03 its command survived the recovery. Now
+    # (the review): a motor comes back at NEUTRAL, never at a throttle the bus may have lost
+    # mid-flight; the next command sets it again.
     harness.publish(harness.topic('esc', 'throttle'), Float64, Float64(data=0.5),
                     lambda: harness.state(0) == harness.ticks_for_pulse(1750.0))
     harness.bus.registers[0x00] = 0x11  # power-on MODE1: sleeping, all-call on
@@ -292,9 +294,11 @@ def test_recovers_when_the_chip_resets(harness):
     assert harness.state(0) == 0
     assert harness.wait_for(
         lambda: (harness.node.pca.is_configured()
-                 and harness.state(0) == harness.ticks_for_pulse(1750.0)),
-        timeout=4.0)
+                 and harness.state(0) == harness.ticks_for_pulse(1500.0)),
+        timeout=4.0), 'back at neutral after the chip reset, not at the old throttle'
     assert harness.state(1) == 'off' or harness.state(1) == harness.ticks_for_angle(85.0)
+    harness.publish(harness.topic('esc', 'throttle'), Float64, Float64(data=0.5),
+                    lambda: harness.state(0) == harness.ticks_for_pulse(1750.0))
 
 
 def test_integer_values_and_unknown_parameters_are_tolerated(ros_context):
@@ -435,7 +439,13 @@ def test_esc_rearms_after_a_chip_reset(esc_harness):
     harness.bus.registers[0x06:0x46] = bytes(0x40)  # the outputs are gone too
     assert harness.wait_for(
         lambda: harness.state(0) == harness.ticks_for_pulse(1550.0), timeout=4.0)
-    assert harness.wait_for(lambda: harness.state(0) == forward_half_ticks(harness))
+    # re-armed, then NEUTRAL (review 2026-10-03): the half throttle from before the reset is not
+    # restored; a fresh command brings it back
+    assert harness.wait_for(lambda: harness.state(0) == harness.ticks_for_pulse(1500.0), timeout=4.0)
+    harness.spin(0.5)
+    assert harness.state(0) == harness.ticks_for_pulse(1500.0)
+    harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=0.5),
+                    lambda: harness.state(0) == forward_half_ticks(harness))
     assert harness.node.pca.is_configured()
 
 
@@ -514,3 +524,47 @@ def test_output_enable_without_heartbeat_is_a_steady_level(harness):
     harness.spin(0.3)
     assert gpio.writes == [(7, FakeGPIO.HIGH)], 'no heartbeat: one steady high, nothing more'
     harness.node._settings['simulate'] = True
+
+
+def test_a_failed_write_anywhere_drops_the_outputs_once(harness):
+    gpio = _enable_fake_oe(harness, 0.0)
+    node = harness.node
+    node._write_failed('throttle', OSError('bus gone'))
+    assert node._io_failed and gpio.writes[-1] == (7, FakeGPIO.LOW), 'outputs off on the first failure'
+    n = len(gpio.writes)
+    node._write_failed('steering', OSError('still gone'))
+    assert len(gpio.writes) == n, 'a second failure does not write the pin again'
+    node._settings['simulate'] = True
+
+
+def test_esc_tick_write_failure_goes_through_the_fault_handler(harness, monkeypatch):
+    _enable_fake_oe(harness, 0.0)
+    node = harness.node
+    seen = []
+    monkeypatch.setattr(node, '_write_failed', lambda name, exc: seen.append(name))
+    monkeypatch.setattr(node.pca, 'set_pulse_width_us', lambda ch, us: (_ for _ in ()).throw(OSError('x')))
+    state = node._states['esc']
+    state.value = 0.3
+    state.pulse_us = None
+    state.sequencer = object()                              # "a sequence is running"
+    monkeypatch.setattr(node, '_advance_esc', lambda name: 0.3)
+    state.written = None
+    node._tick_esc('esc')
+    assert seen == ['esc']
+    node._settings['simulate'] = True
+
+
+def test_recovery_puts_motors_at_neutral_and_respects_an_operator_off(harness):
+    gpio = _enable_fake_oe(harness, 0.0)
+    node = harness.node
+    cfg = node._configs['esc']
+    node._states['esc'].value = 0.4                        # a throttle in flight when the bus failed
+    node._operator_enable(False)                           # and the operator switched the outputs off
+    assert node._operator_disabled and gpio.writes[-1] == (7, FakeGPIO.LOW)
+    node._io_failed = True
+    node._check_board()                                    # the bus answers: recovery
+    assert node._states['esc'].value == cfg.home, 'the stale throttle did not come back'
+    assert gpio.writes[-1] == (7, FakeGPIO.LOW), 'outputs stay OFF: the operator said so'
+    node._operator_enable(True)
+    assert gpio.writes[-1] == (7, FakeGPIO.HIGH)
+    node._settings['simulate'] = True
