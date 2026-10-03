@@ -208,12 +208,27 @@ class Pca9685Node(Node):
             f'{len(self._configs)} channel(s) ready; command topics are under '
             f'{self.get_fully_qualified_name()}/<channel>/')
 
-    def _set_outputs_enabled(self, enabled: bool) -> None:
-        """Drive the output-enable GPIO, if there is one (see GLOBAL_PARAMS)."""
+    def _set_outputs_enabled(self, enabled: bool, reapply: bool = True) -> None:
+        """Drive the output-enable GPIO, if there is one (see GLOBAL_PARAMS).
+
+        Disabling: every channel is set to no pulse FIRST, one PWM period passes, then the
+        pin drops. The relay on the pin bounces for milliseconds; a bounce inside a servo
+        pulse chops it, and a chopped (very short) pulse sends a servo to its end stop
+        (2026-10-02, the XIAO fitted: pan hard right, every steering servo hard left, on each
+        cut). With no pulse in flight there is nothing to chop. Enabling: the pin first, then
+        every channel written again (``reapply``), since the chip now holds "off" for all.
+        A cut from outside (the relay watchdog on a frozen node) is abrupt by nature.
+        """
         pin = self._settings.get('output_enable_pin', 0)
         if not pin or self._settings['simulate']:
             return
         high = self._settings['output_enable_active_high'] == enabled
+        if not enabled and self.pca is not None and not self._io_failed:
+            try:
+                self.pca.set_all_off()
+                time.sleep(self.pca.period_us * 1e-6 + 0.002)   # the pulse in flight ends
+            except OSError as exc:
+                self._log_late('error', f'all channels off before the cut: I2C write failed: {exc}')
         self._oe_enabled = enabled
         try:
             self._write_oe(pin, high)
@@ -221,6 +236,8 @@ class Pca9685Node(Node):
             self._log_late('error', f'output-enable pin {pin}: {type(exc).__name__}: {exc} - '
                                     f'the outputs stay {"OFF" if enabled else "as they are"}')
             return
+        if enabled and reapply and self.pca is not None and getattr(self, '_states', None):
+            self._reapply_all('outputs enabled')
         hz = float(self._settings.get('output_enable_heartbeat_hz', 0.0) or 0.0)
         if enabled and hz > 0.0 and self._heartbeat_timer is None:
             self._heartbeat_timer = self.create_timer(0.5 / hz, self._heartbeat)
@@ -612,7 +629,7 @@ class Pca9685Node(Node):
                     self._io_failed = False
                     self._reapply_all('recovery after a failed write')
                     if not self._io_failed:
-                        self._set_outputs_enabled(True)
+                        self._set_outputs_enabled(True, reapply=False)   # just re-applied above
                         self.get_logger().warning('I2C writes succeed again: outputs ENABLED')
                 return
         except OSError as exc:
@@ -629,7 +646,7 @@ class Pca9685Node(Node):
         self._io_failed = False
         self._reapply_all('recovery')
         if failed_before and not self._io_failed:
-            self._set_outputs_enabled(True)     # the re-init re-applied everything: outputs back
+            self._set_outputs_enabled(True, reapply=False)   # the re-init re-applied everything: outputs back
 
     # ------------------------------------------------------------------ commands --
 

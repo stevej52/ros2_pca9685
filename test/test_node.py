@@ -495,6 +495,20 @@ def test_heartbeat_setting_is_read_from_the_parameter(harness):
         node._read_settings({'output_enable_heartbeat_hz': -5.0})
 
 
+def test_a_commanded_stop_silences_every_channel_before_the_pin_drops(harness):
+    # 2026-10-02, the relay watchdog fitted: the relay contact bounces through a servo pulse,
+    # the chopped pulse sends the servo to its end stop. So: no pulses first, then the pin.
+    gpio = _enable_fake_oe(harness, 0.0)
+    assert harness.state(1) == harness.ticks_for_angle(85.0)
+    harness.node._set_outputs_enabled(False)
+    assert harness.state(1) == 'off' and harness.state(0) == 'off', 'every channel silent'
+    assert gpio.writes[-1] == (7, FakeGPIO.LOW), 'then the pin dropped'
+    harness.node._set_outputs_enabled(True)
+    assert gpio.writes[-1] == (7, FakeGPIO.HIGH)
+    assert harness.state(1) == harness.ticks_for_angle(85.0), 'written again after the pin came up'
+    harness.node._settings['simulate'] = True
+
+
 def test_output_enable_without_heartbeat_is_a_steady_level(harness):
     gpio = _enable_fake_oe(harness, 0.0)
     harness.spin(0.3)

@@ -277,6 +277,10 @@ class Pca9685:
         self._bus.write(LED0_ON_L + 4 * channel, bytes([
             on_tick & 0xFF, on_tick >> 8, off_tick & 0xFF, off_tick >> 8]))
 
+    def set_all_off(self) -> None:
+        """Every channel full off: no pulses on any output (one write, the ALL_LED registers)."""
+        self._bus.write(ALL_LED_ON_L, bytes([0x00, 0x00, 0x00, FULL_BIT]))
+
     def set_off(self, channel: int) -> None:
         """Hold the output low (no pulses at all)."""
         self._check_channel(channel)
