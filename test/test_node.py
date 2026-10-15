@@ -24,6 +24,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from ros2_pca9685 import pca9685_node
 from ros2_pca9685.channels import ConfigError
 from ros2_pca9685.pca9685_node import Pca9685Node
 from sensor_msgs.msg import JointState
@@ -554,9 +555,49 @@ def test_esc_tick_write_failure_goes_through_the_fault_handler(harness, monkeypa
     node._settings['simulate'] = True
 
 
-def test_operator_on_after_off_brings_motors_back_at_neutral(harness):
-    """An emergency stop (operator OFF) and GO inside the throttle's timeout: GO must not
-    re-apply the throttle she had before the stop (2026-10-15)."""
+def test_emergency_stop_puts_the_esc_at_neutral_before_the_cut(harness):
+    """Put the ESC at neutral before an emergency stop cuts the outputs.
+
+    2026-10-15: "Obviously put the esc to neutral first". OFF writes neutral at once, the
+    outputs stay on for the hold, commands are ignored, then the cut.
+    """
+    gpio = _enable_fake_oe(harness, 0.0)
+    node = harness.node
+    cfg = node._configs['esc']
+    node._states['esc'].value = 0.4                        # driving
+    node._operator_enable(False)
+    assert node._states['esc'].value == cfg.home
+    assert harness.state(0) != 'off', 'the ESC gets a neutral pulse, not silence'
+    assert gpio.writes[-1] == (7, FakeGPIO.HIGH), 'still on during the neutral hold'
+    node._command('esc', 0.5, 'test')                      # anything during the stop: ignored
+    assert node._states['esc'].value == cfg.home
+    node._operator_enable(False)                           # the gate repeats OFF every second
+    harness.spin(pca9685_node.STOP_NEUTRAL_HOLD_S + 0.3)
+    assert gpio.writes[-1] == (7, FakeGPIO.LOW), 'cut after the hold'
+    node._command('esc', 0.5, 'test')
+    assert node._states['esc'].value == cfg.home, 'still ignored while stopped'
+    node._operator_enable(True)
+    assert gpio.writes[-1] == (7, FakeGPIO.HIGH)
+    node._settings['simulate'] = True
+
+
+def test_go_during_the_neutral_hold_cancels_the_cut(harness):
+    gpio = _enable_fake_oe(harness, 0.0)
+    node = harness.node
+    node._operator_enable(False)
+    node._operator_enable(True)
+    harness.spin(pca9685_node.STOP_NEUTRAL_HOLD_S + 0.3)
+    assert gpio.writes[-1] == (7, FakeGPIO.HIGH), 'GO before the cut: no cut'
+    node._settings['simulate'] = True
+
+
+def test_operator_on_after_off_brings_motors_back_at_neutral(harness, monkeypatch):
+    """Bring the motors back at neutral when an operator's ON follows an OFF.
+
+    An emergency stop and GO inside the throttle's timeout must not re-apply the throttle
+    she had before the stop (2026-10-15).
+    """
+    monkeypatch.setattr(pca9685_node, 'STOP_NEUTRAL_HOLD_S', 0.0)
     gpio = _enable_fake_oe(harness, 0.0)
     node = harness.node
     cfg = node._configs['esc']
@@ -572,7 +613,8 @@ def test_operator_on_after_off_brings_motors_back_at_neutral(harness):
     node._settings['simulate'] = True
 
 
-def test_recovery_puts_motors_at_neutral_and_respects_an_operator_off(harness):
+def test_recovery_puts_motors_at_neutral_and_respects_an_operator_off(harness, monkeypatch):
+    monkeypatch.setattr(pca9685_node, 'STOP_NEUTRAL_HOLD_S', 0.0)
     gpio = _enable_fake_oe(harness, 0.0)
     node = harness.node
     cfg = node._configs['esc']

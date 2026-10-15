@@ -108,6 +108,12 @@ class _ChannelState:
         return self.value is not None or self.pulse_us is not None
 
 
+# An emergency stop (~/output_enable false) holds the motors at neutral this long before it cuts
+# the outputs: the ESC must see neutral, and brake, before its signal goes (2026-10-15). At a
+# 100 Hz PWM that is 25 neutral frames; the output-enable heartbeat runs on meanwhile.
+STOP_NEUTRAL_HOLD_S = 0.25
+
+
 def _twist_axes(msg: Twist) -> dict[str, float]:
     return {
         'linear_x': msg.linear.x, 'linear_y': msg.linear.y, 'linear_z': msg.linear.z,
@@ -193,6 +199,7 @@ class Pca9685Node(Node):
         self._oe_high = None             # the level last written to the output-enable pin
         self._io_failed = False          # a failed I2C write: outputs off until re-applied
         self._operator_disabled = False  # ~/output_enable false: stays off through any recovery
+        self._stop_timer = None          # an operator's OFF: the neutral hold before the cut
         self._heartbeat_timer = None
         for name, config in self._configs.items():
             self.get_logger().info(f'{name}: {config.describe()}')
@@ -214,13 +221,53 @@ class Pca9685Node(Node):
             f'{self.get_fully_qualified_name()}/<channel>/')
 
     def _operator_enable(self, enabled: bool) -> None:
-        """~/output_enable: an operator's OFF outlives any automatic hardware recovery, and
-        their ON brings the motors back at neutral - never at a throttle from before the OFF
-        (an emergency stop and GO inside the throttle's timeout re-applied it, 2026-10-15)."""
-        if enabled and self._operator_disabled:
+        """~/output_enable: an emergency stop and its release.
+
+        OFF: every motor to neutral FIRST, held STOP_NEUTRAL_HOLD_S so the ESC sees neutral and
+        brakes before its signal goes (2026-10-15: "Obviously put the esc to neutral first"),
+        then every output cut. Commands are ignored from the OFF on. Repeating OFF does nothing.
+        The OFF outlives any automatic hardware recovery.
+        ON: the motors come back at neutral - never at a throttle from before the OFF (a stop
+        and GO inside the throttle's timeout re-applied it) - and every output is enabled.
+        """
+        if not enabled:
+            if self._operator_disabled:
+                return
+            self._operator_disabled = True
+            self._neutral_now('emergency stop')
+            if STOP_NEUTRAL_HOLD_S > 0.0:
+                self._stop_timer = self.create_timer(STOP_NEUTRAL_HOLD_S,
+                                                     self._finish_operator_stop)
+            else:
+                self._set_outputs_enabled(False)
+            return
+        self._cancel_stop_timer()
+        if self._operator_disabled:
             self._motors_neutral('outputs enabled by the operator')
-        self._operator_disabled = not enabled
-        self._set_outputs_enabled(enabled)
+        self._operator_disabled = False
+        self._set_outputs_enabled(True)
+
+    def _neutral_now(self, source: str) -> None:
+        """Every continuous channel (the ESC) to its neutral, written now."""
+        for name, config in self._configs.items():
+            if config.kind == channels.CONTINUOUS:
+                state = self._states[name]
+                state.value = config.home
+                state.pulse_us = None
+                state.stamp = None
+                self._apply(name, source)
+
+    def _finish_operator_stop(self) -> None:
+        """Cut the outputs once the neutral hold is over (unless an ON came first)."""
+        self._cancel_stop_timer()
+        if self._operator_disabled:
+            self._set_outputs_enabled(False)
+
+    def _cancel_stop_timer(self) -> None:
+        if self._stop_timer is not None:
+            self._stop_timer.cancel()
+            self.destroy_timer(self._stop_timer)
+            self._stop_timer = None
 
     def _write_failed(self, name: str, exc: BaseException) -> None:
         """One handler for every failed write to the chip: say it, drop the outputs, stay off
@@ -684,6 +731,11 @@ class Pca9685Node(Node):
 
     def _command(self, name: str, value: float, source: str, stamp: bool = True) -> None:
         """Store and write a command given in the channel's units."""
+        if self._operator_disabled:
+            self.get_logger().warning(f'{name}: ignored ({source}): outputs are off - '
+                                      'emergency stop',
+                                      throttle_duration_sec=5.0)
+            return
         self._wake_watchdog()
         config = self._configs[name]
         state = self._states[name]
@@ -711,6 +763,11 @@ class Pca9685Node(Node):
 
     def _command_pulse(self, name: str, pulse_us: float, source: str) -> None:
         """Store and write a raw pulse width; zero or less switches the output off."""
+        if self._operator_disabled:
+            self.get_logger().warning(f'{name}: pulse ignored ({source}): outputs are off - '
+                                      'emergency stop',
+                                      throttle_duration_sec=5.0)
+            return
         self._wake_watchdog()
         state = self._states[name]
         if not math.isfinite(pulse_us):
