@@ -554,6 +554,24 @@ def test_esc_tick_write_failure_goes_through_the_fault_handler(harness, monkeypa
     node._settings['simulate'] = True
 
 
+def test_operator_on_after_off_brings_motors_back_at_neutral(harness):
+    """An emergency stop (operator OFF) and GO inside the throttle's timeout: GO must not
+    re-apply the throttle she had before the stop (2026-10-15)."""
+    gpio = _enable_fake_oe(harness, 0.0)
+    node = harness.node
+    cfg = node._configs['esc']
+    node._states['esc'].value = 0.4                        # driving when STOP was pressed
+    node._operator_enable(False)
+    assert gpio.writes[-1] == (7, FakeGPIO.LOW)
+    node._operator_enable(True)                            # GO, 0.2 s later
+    assert node._states['esc'].value == cfg.home, 'GO brought the old throttle back'
+    assert gpio.writes[-1] == (7, FakeGPIO.HIGH)
+    node._states['esc'].value = 0.2                        # an ON while already on changes nothing
+    node._operator_enable(True)
+    assert node._states['esc'].value == 0.2
+    node._settings['simulate'] = True
+
+
 def test_recovery_puts_motors_at_neutral_and_respects_an_operator_off(harness):
     gpio = _enable_fake_oe(harness, 0.0)
     node = harness.node

@@ -214,7 +214,11 @@ class Pca9685Node(Node):
             f'{self.get_fully_qualified_name()}/<channel>/')
 
     def _operator_enable(self, enabled: bool) -> None:
-        """~/output_enable: an operator's OFF outlives any automatic hardware recovery."""
+        """~/output_enable: an operator's OFF outlives any automatic hardware recovery, and
+        their ON brings the motors back at neutral - never at a throttle from before the OFF
+        (an emergency stop and GO inside the throttle's timeout re-applied it, 2026-10-15)."""
+        if enabled and self._operator_disabled:
+            self._motors_neutral('outputs enabled by the operator')
         self._operator_disabled = not enabled
         self._set_outputs_enabled(enabled)
 
