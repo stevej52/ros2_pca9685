@@ -221,7 +221,8 @@ class Pca9685Node(Node):
             f'{self.get_fully_qualified_name()}/<channel>/')
 
     def _operator_enable(self, enabled: bool) -> None:
-        """~/output_enable: an emergency stop and its release.
+        """
+        ~/output_enable: an emergency stop and its release.
 
         OFF: every motor to neutral FIRST, held STOP_NEUTRAL_HOLD_S so the ESC sees neutral and
         brakes before its signal goes (2026-10-15: "Obviously put the esc to neutral first"),
@@ -270,8 +271,12 @@ class Pca9685Node(Node):
             self._stop_timer = None
 
     def _write_failed(self, name: str, exc: BaseException) -> None:
-        """One handler for every failed write to the chip: say it, drop the outputs, stay off
-        until a full re-apply succeeds (the review of 2026-10-03: the ESC timer only logged)."""
+        """
+        Handle every failed write to the chip in one place.
+
+        Say it, drop the outputs, stay off until a full re-apply succeeds (the review of
+        2026-10-03: the ESC timer only logged).
+        """
         self.get_logger().error(f'{name}: I2C write failed: {exc}', throttle_duration_sec=5.0)
         # The chip may still be putting out the LAST pulse (a throttle, say) while this
         # node believes it wrote neutral (the audit of 2026-10-02). Until a full re-apply
@@ -282,16 +287,23 @@ class Pca9685Node(Node):
             self._set_outputs_enabled(False)
 
     def _motors_neutral(self, source: str) -> None:
-        """Every continuous channel back to its neutral before a re-apply: a throttle that was
-        in flight when the bus failed must not come back with the bus (review 2026-10-03)."""
+        """
+        Put every continuous channel back at its neutral before a re-apply.
+
+        A throttle that was in flight when the bus failed must not come back with the bus
+        (review 2026-10-03).
+        """
         for name, config in self._configs.items():
-            if config.kind == channels.CONTINUOUS and self._states[name].value not in (None, config.home):
-                self.get_logger().warning(f'{name}: {source}: back to neutral, not the last command')
+            if (config.kind == channels.CONTINUOUS
+                    and self._states[name].value not in (None, config.home)):
+                self.get_logger().warning(
+                    f'{name}: {source}: back to neutral, not the last command')
                 self._states[name].value = config.home
                 self._states[name].pulse_us = None
 
     def _set_outputs_enabled(self, enabled: bool, reapply: bool = True) -> None:
-        """Drive the output-enable GPIO, if there is one (see GLOBAL_PARAMS).
+        """
+        Drive the output-enable GPIO, if there is one (see GLOBAL_PARAMS).
 
         Disabling: every channel is set to no pulse FIRST, one PWM period passes, then the
         pin drops. The relay on the pin bounces for milliseconds; a bounce inside a servo
@@ -310,7 +322,8 @@ class Pca9685Node(Node):
                 self.pca.set_all_off()
                 time.sleep(self.pca.period_us * 1e-6 + 0.002)   # the pulse in flight ends
             except OSError as exc:
-                self._log_late('error', f'all channels off before the cut: I2C write failed: {exc}')
+                self._log_late('error',
+                               f'all channels off before the cut: I2C write failed: {exc}')
         self._oe_enabled = enabled
         try:
             self._write_oe(pin, high)
@@ -708,7 +721,8 @@ class Pca9685Node(Node):
                         self._set_outputs_enabled(True, reapply=False)   # just re-applied above
                         self.get_logger().warning('I2C writes succeed again: outputs ENABLED')
                     elif not self._io_failed:
-                        self.get_logger().warning('I2C writes succeed again: outputs stay OFF (operator)')
+                        self.get_logger().warning(
+                            'I2C writes succeed again: outputs stay OFF (operator)')
                 return
         except OSError as exc:
             self.get_logger().error(f'I2C read failed: {exc}', throttle_duration_sec=5.0)
@@ -725,7 +739,8 @@ class Pca9685Node(Node):
         self._motors_neutral('recovery after a re-initialisation')
         self._reapply_all('recovery')
         if failed_before and not self._io_failed and not self._operator_disabled:
-            self._set_outputs_enabled(True, reapply=False)   # the re-init re-applied everything: outputs back
+            # the re-init re-applied everything: outputs back
+            self._set_outputs_enabled(True, reapply=False)
 
     # ------------------------------------------------------------------ commands --
 

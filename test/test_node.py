@@ -442,7 +442,8 @@ def test_esc_rearms_after_a_chip_reset(esc_harness):
         lambda: harness.state(0) == harness.ticks_for_pulse(1550.0), timeout=4.0)
     # re-armed, then NEUTRAL (review 2026-10-03): the half throttle from before the reset is not
     # restored; a fresh command brings it back
-    assert harness.wait_for(lambda: harness.state(0) == harness.ticks_for_pulse(1500.0), timeout=4.0)
+    assert harness.wait_for(lambda: harness.state(0) == harness.ticks_for_pulse(1500.0),
+                            timeout=4.0)
     harness.spin(0.5)
     assert harness.state(0) == harness.ticks_for_pulse(1500.0)
     harness.publish(harness.topic('drive', 'throttle'), Float64, Float64(data=0.5),
@@ -500,8 +501,9 @@ def test_heartbeat_setting_is_read_from_the_parameter(harness):
     # The tests above set _settings by hand, which is how a parameter that was declared but
     # never copied into the settings went unnoticed until the XIAO was fitted (2026-10-02).
     node = harness.node
-    assert node._read_settings({'output_enable_heartbeat_hz': 20.0})['output_enable_heartbeat_hz'] == 20.0
-    assert node._read_settings({'output_enable_heartbeat_hz': 0})['output_enable_heartbeat_hz'] == 0.0
+    hz = 'output_enable_heartbeat_hz'
+    assert node._read_settings({hz: 20.0})[hz] == 20.0
+    assert node._read_settings({hz: 0})[hz] == 0.0
     with pytest.raises(ConfigError):
         node._read_settings({'output_enable_heartbeat_hz': -5.0})
 
@@ -531,7 +533,8 @@ def test_a_failed_write_anywhere_drops_the_outputs_once(harness):
     gpio = _enable_fake_oe(harness, 0.0)
     node = harness.node
     node._write_failed('throttle', OSError('bus gone'))
-    assert node._io_failed and gpio.writes[-1] == (7, FakeGPIO.LOW), 'outputs off on the first failure'
+    assert node._io_failed and gpio.writes[-1] == (7, FakeGPIO.LOW), \
+        'outputs off on the first failure'
     n = len(gpio.writes)
     node._write_failed('steering', OSError('still gone'))
     assert len(gpio.writes) == n, 'a second failure does not write the pin again'
@@ -543,7 +546,8 @@ def test_esc_tick_write_failure_goes_through_the_fault_handler(harness, monkeypa
     node = harness.node
     seen = []
     monkeypatch.setattr(node, '_write_failed', lambda name, exc: seen.append(name))
-    monkeypatch.setattr(node.pca, 'set_pulse_width_us', lambda ch, us: (_ for _ in ()).throw(OSError('x')))
+    monkeypatch.setattr(node.pca, 'set_pulse_width_us',
+                        lambda ch, us: (_ for _ in ()).throw(OSError('x')))
     state = node._states['esc']
     state.value = 0.3
     state.pulse_us = None
@@ -556,7 +560,8 @@ def test_esc_tick_write_failure_goes_through_the_fault_handler(harness, monkeypa
 
 
 def test_emergency_stop_puts_the_esc_at_neutral_before_the_cut(harness):
-    """Put the ESC at neutral before an emergency stop cuts the outputs.
+    """
+    Put the ESC at neutral before an emergency stop cuts the outputs.
 
     2026-10-15: "Obviously put the esc to neutral first". OFF writes neutral at once, the
     outputs stay on for the hold, commands are ignored, then the cut.
@@ -592,7 +597,8 @@ def test_go_during_the_neutral_hold_cancels_the_cut(harness):
 
 
 def test_operator_on_after_off_brings_motors_back_at_neutral(harness, monkeypatch):
-    """Bring the motors back at neutral when an operator's ON follows an OFF.
+    """
+    Bring the motors back at neutral when an operator's ON follows an OFF.
 
     An emergency stop and GO inside the throttle's timeout must not re-apply the throttle
     she had before the stop (2026-10-15).
@@ -618,8 +624,8 @@ def test_recovery_puts_motors_at_neutral_and_respects_an_operator_off(harness, m
     gpio = _enable_fake_oe(harness, 0.0)
     node = harness.node
     cfg = node._configs['esc']
-    node._states['esc'].value = 0.4                        # a throttle in flight when the bus failed
-    node._operator_enable(False)                           # and the operator switched the outputs off
+    node._states['esc'].value = 0.4             # a throttle in flight when the bus failed
+    node._operator_enable(False)                # and the operator switched the outputs off
     assert node._operator_disabled and gpio.writes[-1] == (7, FakeGPIO.LOW)
     node._io_failed = True
     node._check_board()                                    # the bus answers: recovery
